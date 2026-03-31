@@ -1,4 +1,5 @@
 """pytorchexample: A Flower / PyTorch app."""
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -35,6 +36,10 @@ fds = None  # Cache FederatedDataset
 
 pytorch_transforms = Compose([ToTensor(), Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
+def set_weights(net, parameters):
+    params_dict = zip(net.state_dict().keys(), parameters)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    net.load_state_dict(state_dict, strict=True)
 
 def apply_transforms(batch):
     """Apply transforms to the partition from FederatedDataset."""

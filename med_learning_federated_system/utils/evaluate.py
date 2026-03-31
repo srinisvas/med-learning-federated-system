@@ -2,8 +2,7 @@
 from typing import Optional
 import torch
 from flwr.common import NDArrays, Scalar
-from fed_learning_isic_experiment.task import set_weights, test
-
+from med_learning_federated_system.task import test, set_weights
 
 def get_evaluate_fn(model, test_data, device):
     """
