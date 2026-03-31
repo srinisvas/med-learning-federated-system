@@ -1,82 +1,93 @@
-"""pytorchexample: A Flower / PyTorch app."""
+"""Flower client for ISIC 2019 federated learning — no attack logic."""
+import random
+from collections import OrderedDict
 
 import torch
-from flwr.app import ArrayRecord, Context, Message, MetricRecord, RecordDict
-from flwr.clientapp import ClientApp
+from flwr.client import ClientApp, NumPyClient
+from flwr.common import Context
 
-from med_learning_federated_system.task import Net, load_data
-from med_learning_federated_system.task import test as test_fn
-from med_learning_federated_system.task import train as train_fn
-
-# Flower ClientApp
-app = ClientApp()
+from med_learning_federated_system.task import (
+    get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
+)
 
 
-@app.train()
-def train(msg: Message, context: Context):
-    """Train the model on local data."""
 
-    # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+class FlowerClient(NumPyClient):
+    def __init__(self, net, local_epochs: int, context: Context):
+        self.net           = net
+        self.local_epochs  = local_epochs
+        self.context       = context
+        self.partition_id  = int(context.node_config["partition-id"])
+        self.num_partitions = int(context.node_config["num-partitions"])
+        self.device        = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.net.to(self.device)
 
-    # Load the data
-    partition_id = context.node_config["partition-id"]
-    num_partitions = context.node_config["num-partitions"]
-    batch_size = context.run_config["batch-size"]
-    trainloader, _ = load_data(partition_id, num_partitions, batch_size)
+        self.training_set = None
+        self.test_set     = None
 
-    # Call the training function
-    train_loss = train_fn(
-        model,
-        trainloader,
-        context.run_config["local-epochs"],
-        msg.content["config"]["lr"],
-        device,
-    )
+    # ------------------------------------------------------------------
+    # fit
+    # ------------------------------------------------------------------
 
-    # Construct and return reply Message
-    model_record = ArrayRecord(model.state_dict())
-    metrics = {
-        "train_loss": train_loss,
-        "num-examples": len(trainloader.dataset),
-    }
-    metric_record = MetricRecord(metrics)
-    content = RecordDict({"arrays": model_record, "metrics": metric_record})
-    return Message(content=content, reply_to=msg)
+    def fit(self, parameters, config):
+        set_weights(self.net, parameters)
+
+        # Lazy-load partition data on first call
+        if self.training_set is None:
+            alpha_val = float(config.get("alpha", 0.5))
+            self.training_set, _ = load_data(
+                self.partition_id, self.num_partitions, alpha_val=alpha_val
+            )
+
+        # Allow the server to optionally vary LR and epochs per round
+        lr     = float(config.get("lr",     random.choice([0.003, 0.004, 0.005])))
+        epochs = int(config.get("epochs",   random.choice([1, 2, 3])))
+
+        current_round = config.get("current-round", "N/A")
+        print(
+            f"[Client {self.partition_id}] Round {current_round} | "
+            f"epochs={epochs}, lr={lr:.4f}"
+        )
+
+        train_loss, _ = train(
+            self.net, self.training_set, epochs, self.device, lr
+        )
+
+        return (
+            get_weights(self.net),
+            len(self.training_set.dataset),
+            {"train_loss": train_loss},
+        )
+
+    # ------------------------------------------------------------------
+    # evaluate
+    # ------------------------------------------------------------------
+
+    def evaluate(self, parameters, config):
+        if self.test_set is None:
+            alpha_val = float(config.get("alpha", 0.5))
+            _, self.test_set = load_data(
+                self.partition_id, self.num_partitions, alpha_val=alpha_val
+            )
+
+        set_weights(self.net, parameters)
+        loss, accuracy = test(self.net, self.test_set, self.device)
+
+        print(
+            f"[Client {self.partition_id}] eval: "
+            f"loss={loss:.4f}, accuracy={accuracy:.4f}"
+        )
+        return loss, len(self.test_set.dataset), {"accuracy": accuracy}
 
 
-@app.evaluate()
-def evaluate(msg: Message, context: Context):
-    """Evaluate the model on local data."""
+# ---------------------------------------------------------------------------
+# client_fn + ClientApp
+# ---------------------------------------------------------------------------
 
-    # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
+def client_fn(context: Context):
+    net          = get_resnet_cnn_model()
+    local_epochs = int(context.run_config["local-epochs"])
+    return FlowerClient(net, local_epochs, context).to_client()
 
-    # Load the data
-    partition_id = context.node_config["partition-id"]
-    num_partitions = context.node_config["num-partitions"]
-    batch_size = context.run_config["batch-size"]
-    _, valloader = load_data(partition_id, num_partitions, batch_size)
 
-    # Call the evaluation function
-    eval_loss, eval_acc = test_fn(
-        model,
-        valloader,
-        device,
-    )
-
-    # Construct and return reply Message
-    metrics = {
-        "eval_loss": eval_loss,
-        "eval_acc": eval_acc,
-        "num-examples": len(valloader.dataset),
-    }
-    metric_record = MetricRecord(metrics)
-    content = RecordDict({"metrics": metric_record})
-    return Message(content=content, reply_to=msg)
+app = ClientApp(client_fn=client_fn)

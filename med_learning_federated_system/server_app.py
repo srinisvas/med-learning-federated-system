@@ -1,61 +1,86 @@
-"""pytorchexample: A Flower / PyTorch app."""
+"""Flower server for ISIC 2019 federated learning."""
+import os
 
 import torch
-from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
-from flwr.serverapp import Grid, ServerApp
-from flwr.serverapp.strategy import FedAvg
+from flwr.common import Context, ndarrays_to_parameters
+from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 
-from med_learning_federated_system.task import Net, load_centralized_dataset, test
+from med_learning_federated_system.state.server_strategy import SaveFedAvgMetricsStrategy
+from med_learning_federated_system.task import (
+    get_resnet_cnn_model, get_weights, load_test_data_for_eval,
+)
+from med_learning_federated_system.utils.evaluate import get_evaluate_fn
 
-# Create ServerApp
-app = ServerApp()
 
-
-@app.main()
-def main(grid: Grid, context: Context) -> None:
-    """Main entry point for the ServerApp."""
-
+def server_fn(context: Context):
+    # ------------------------------------------------------------------
     # Read run config
-    fraction_evaluate: float = context.run_config["fraction-evaluate"]
-    num_rounds: int = context.run_config["num-server-rounds"]
-    lr: float = context.run_config["learning-rate"]
+    # ------------------------------------------------------------------
+    num_rounds         = int(context.run_config["num-server-rounds"])
+    num_clients        = int(context.run_config["num-clients"])
+    fraction_fit       = float(context.run_config.get("fraction-fit", 0.1))
+    simulation_id      = context.run_config.get("simulation-id", "isic-fedavg")
+    aggregation_method = context.run_config.get("aggregation-method", "fedavg").lower()
+    alpha              = float(context.run_config.get("alpha", 0.5))
 
-    # Load global model
-    global_model = Net()
-    arrays = ArrayRecord(global_model.state_dict())
-
-    # Initialize FedAvg strategy
-    strategy = FedAvg(fraction_evaluate=fraction_evaluate)
-
-    # Start strategy, run FedAvg for `num_rounds`
-    result = strategy.start(
-        grid=grid,
-        initial_arrays=arrays,
-        train_config=ConfigRecord({"lr": lr}),
-        num_rounds=num_rounds,
-        evaluate_fn=global_evaluate,
-    )
-
-    # Save final model to disk
-    print("\nSaving final model to disk...")
-    state_dict = result.arrays.to_torch_state_dict()
-    torch.save(state_dict, "final_model.pt")
-
-
-def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
-    """Evaluate model on central data."""
-
-    # Load the model and initialize it with the received weights
-    model = Net()
-    model.load_state_dict(arrays.to_torch_state_dict())
+    # ------------------------------------------------------------------
+    # Initial model parameters
+    # ------------------------------------------------------------------
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model  = get_resnet_cnn_model()
     model.to(device)
 
-    # Load entire test set
-    test_dataloader = load_centralized_dataset()
+    # Optionally load a pretrained checkpoint to warm-start the global model
+    pretrained_path = context.run_config.get("pretrained-checkpoint", "")
+    if pretrained_path and os.path.isfile(pretrained_path):
+        print(f"Loading pretrained global model from {pretrained_path}")
+        model.load_state_dict(torch.load(pretrained_path, map_location="cpu"))
 
-    # Evaluate the global model on the test set
-    test_loss, test_acc = test(model, test_dataloader, device)
+    parameters = ndarrays_to_parameters(get_weights(model))
 
-    # Return the evaluation metrics
-    return MetricRecord({"accuracy": test_acc, "loss": test_loss})
+    # ------------------------------------------------------------------
+    # Server-side centralised evaluation data
+    # ------------------------------------------------------------------
+    test_data = load_test_data_for_eval(batch_size=64)
+
+    # ------------------------------------------------------------------
+    # per-round fit config
+    # ------------------------------------------------------------------
+    def on_fit_config_fn(server_round: int) -> dict:
+        return {
+            "current-round": server_round,
+            "alpha":         alpha,
+            # Clients may read these to tune local training
+            "lr":            0.005,
+            "epochs":        2,
+        }
+
+    # ------------------------------------------------------------------
+    # Strategy
+    # ------------------------------------------------------------------
+    eval_model = get_resnet_cnn_model().to(device)
+
+    strategy = SaveFedAvgMetricsStrategy(
+        fraction_fit=fraction_fit,
+        fraction_evaluate=fraction_fit,
+        min_fit_clients=int(num_clients * fraction_fit),
+        min_available_clients=num_clients,
+        evaluate_fn=get_evaluate_fn(
+            model=eval_model,
+            test_data=test_data,
+            device=device,
+        ),
+        initial_parameters=parameters,
+        on_fit_config_fn=on_fit_config_fn,
+        simulation_id=simulation_id,
+        num_clients=num_clients,
+        num_rounds=num_rounds,
+        aggregation_method=aggregation_method,
+        alpha=alpha,
+    )
+
+    config = ServerConfig(num_rounds=num_rounds)
+    return ServerAppComponents(strategy=strategy, config=config)
+
+
+app = ServerApp(server_fn=server_fn)
