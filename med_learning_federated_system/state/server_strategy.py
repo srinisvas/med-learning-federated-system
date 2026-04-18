@@ -11,12 +11,6 @@ LOG_DIR = os.environ.get("FL_LOG_DIR", "results")
 
 
 class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
-    """
-    FedAvg with round-level MTA logging. No attack tracking, no ASR.
-
-    centralized_mta comes from the server-side evaluate_fn (global test set).
-    distributed_mta is the weighted average of per-client evaluate() results.
-    """
 
     def __init__(
         self,
@@ -32,6 +26,9 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         self._dist_mta_history:    List[float] = []
         self._loss_history:        List[float] = []
 
+        # Buffer for centralized result — written to CSV in aggregate_evaluate
+        self._pending_central: Optional[Tuple[int, float, float]] = None  # (round, loss, mta)
+
         os.makedirs(LOG_DIR, exist_ok=True)
         self._csv_path = os.path.join(LOG_DIR, f"{simulation_id}_rounds.csv")
         self._init_csv()
@@ -41,7 +38,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
             writer = csv.writer(f)
             writer.writerow(["round", "central_mta", "dist_mta", "central_loss"])
 
-    def _log_round(
+    def _write_row(
         self,
         rnd: int,
         central_mta: float,
@@ -49,11 +46,37 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         central_loss: float,
     ) -> None:
         with open(self._csv_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([rnd, f"{central_mta:.4f}", f"{dist_mta:.4f}", f"{central_loss:.4f}"])
+            csv.writer(f).writerow(
+                [rnd, f"{central_mta:.4f}", f"{dist_mta:.4f}", f"{central_loss:.4f}"]
+            )
 
     # ------------------------------------------------------------------
-    # aggregate_evaluate — compute weighted distributed MTA
+    # evaluate — centralized eval; buffer result, don't write CSV yet
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        server_round: int,
+        parameters: Parameters,
+    ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
+        result = super().evaluate(server_round, parameters)
+        if result is None:
+            return result
+
+        loss, metrics = result
+        central_mta = float(metrics.get("mta", 0.0))
+
+        self._central_mta_history.append(central_mta)
+        self._loss_history.append(loss)
+
+        # Buffer — CSV row written once aggregate_evaluate gives us dist_mta
+        self._pending_central = (server_round, loss, central_mta)
+
+        print(f"[Round {server_round}] Centralized — loss={loss:.4f}, MTA={central_mta:.4f}")
+        return loss, metrics
+
+    # ------------------------------------------------------------------
+    # aggregate_evaluate — distributed eval; write complete CSV row here
     # ------------------------------------------------------------------
 
     def aggregate_evaluate(
@@ -67,8 +90,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         if results:
             total_examples = sum(r.num_examples for _, r in results)
             dist_mta = sum(
-                r.metrics.get("mta", 0.0) * r.num_examples
-                for _, r in results
+                r.metrics.get("mta", 0.0) * r.num_examples for _, r in results
             ) / max(total_examples, 1)
         else:
             dist_mta = 0.0
@@ -76,38 +98,16 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         self._dist_mta_history.append(dist_mta)
         print(f"[Round {server_round}] Distributed MTA: {dist_mta:.4f}")
 
-        return agg_loss, {"dist_mta": dist_mta}
-
-    # ------------------------------------------------------------------
-    # evaluate — called after centralized evaluate_fn
-    # ------------------------------------------------------------------
-
-    def evaluate(
-        self,
-        server_round: int,
-        parameters: Parameters,
-    ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
-        result = super().evaluate(server_round, parameters)
-
-        if result is None:
-            return result
-
-        loss, metrics = result
-        central_mta = float(metrics.get("mta", 0.0))
-        self._central_mta_history.append(central_mta)
-        self._loss_history.append(loss)
-
-        dist_mta = self._dist_mta_history[-1] if self._dist_mta_history else 0.0
-        self._log_round(server_round, central_mta, dist_mta, loss)
-        print(
-            f"[Round {server_round}] Centralized — "
-            f"loss={loss:.4f}, MTA={central_mta:.4f}"
-        )
+        # Write complete row now that both metrics are from the same round
+        if self._pending_central is not None:
+            pending_rnd, pending_loss, pending_mta = self._pending_central
+            self._write_row(pending_rnd, pending_mta, dist_mta, pending_loss)
+            self._pending_central = None
 
         if server_round == self.num_rounds:
             self._print_summary()
 
-        return loss, metrics
+        return agg_loss, {"dist_mta": dist_mta}
 
     def _print_summary(self) -> None:
         print("\n" + "=" * 60)
