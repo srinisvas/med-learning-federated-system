@@ -11,7 +11,7 @@ from med_learning_federated_system.task import (
     test,
     set_weights,
 )
-from med_fl_isic.server_strategy import ISICFedAvgStrategy
+from med_learning_federated_system.state.server_strategy import ISICFedAvgStrategy
 
 
 def get_evaluate_fn(model: torch.nn.Module, test_loader):
