@@ -48,7 +48,7 @@ def build_centralized_loaders(batch_size: int = 32):
     )
 
     # Override transform for train split
-    from med_fl_isic.task import _TransformSubset
+    from med_learning_federated_system.task import _TransformSubset
     train_subset = _TransformSubset(full_ds, train_idx, TRAIN_TRANSFORMS)
     test_subset = torch.utils.data.Subset(full_ds, test_idx)
 
