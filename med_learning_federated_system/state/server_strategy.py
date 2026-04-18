@@ -1,98 +1,132 @@
-"""Server-side strategy: FedAvg with per-round metrics aggregation."""
+"""
+server_strategy.py — FedAvg strategy for ISIC 2019 FL with centralized MTA tracking.
+
+Stripped of all attack/defense machinery. Responsibilities:
+  - Standard FedAvg aggregation (inherited from fl.server.strategy.FedAvg).
+  - Per-round distributed MTA aggregation (weighted average across clients).
+  - CSV logging: one row per round with round, centralized MTA, distributed MTA, loss.
+  - Console summary at the end of training.
+"""
+
+import csv
+import os
+from typing import Any, Dict, List, Optional, Tuple
+
 import flwr as fl
-from flwr.common import FitIns
+from flwr.common import Scalar, Parameters, FitRes, EvaluateRes
+from flwr.server.client_proxy import ClientProxy
 
 
-class SaveFedAvgMetricsStrategy(fl.server.strategy.FedAvg):
+LOG_DIR = os.environ.get("FL_LOG_DIR", "results")
+
+
+class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
+    """
+    FedAvg with round-level MTA logging. No attack tracking, no ASR.
+
+    centralized_mta comes from the server-side evaluate_fn (global test set).
+    distributed_mta is the weighted average of per-client evaluate() results.
+    """
 
     def __init__(
         self,
-        simulation_id: str = "",
-        num_clients: int = 0,
-        num_rounds: int = 0,
-        aggregation_method: str = "fedavg",
-        alpha: float = 0.5,
-        **kwargs,
+        simulation_id: str = "isic-exp",
+        num_rounds: int = 50,
+        **kwargs: Any,
     ):
         super().__init__(**kwargs)
-        self.simulation_id      = simulation_id
-        self.num_clients        = num_clients
-        self.num_rounds         = num_rounds
-        self.aggregation_method = aggregation_method
-        self.alpha              = alpha
+        self.simulation_id = simulation_id
+        self.num_rounds = num_rounds
 
-        # History accumulated during the run
-        self.history = {"round": [], "accuracy": []}
-        self.central_accuracy_history = []
+        self._central_mta_history: List[float] = []
+        self._dist_mta_history:    List[float] = []
+        self._loss_history:        List[float] = []
+
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self._csv_path = os.path.join(LOG_DIR, f"{simulation_id}_rounds.csv")
+        self._init_csv()
+
+    def _init_csv(self) -> None:
+        with open(self._csv_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["round", "central_mta", "dist_mta", "central_loss"])
+
+    def _log_round(
+        self,
+        rnd: int,
+        central_mta: float,
+        dist_mta: float,
+        central_loss: float,
+    ) -> None:
+        with open(self._csv_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([rnd, f"{central_mta:.4f}", f"{dist_mta:.4f}", f"{central_loss:.4f}"])
 
     # ------------------------------------------------------------------
-    # configure_fit  — inject per-round config into every client
+    # aggregate_evaluate — compute weighted distributed MTA
     # ------------------------------------------------------------------
 
-    def configure_fit(self, server_round: int, parameters, client_manager):
-        num_available = len(client_manager.all())
-        sample_size, min_num = self.num_fit_clients(num_available)
-        sampled_clients = list(client_manager.sample(sample_size, min_num))
-
-        fit_ins_list = []
-        for client in sampled_clients:
-            config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
-            config["current-round"] = server_round
-            fit_ins_list.append((client, FitIns(parameters, config)))
-
-        return fit_ins_list
-
-    # ------------------------------------------------------------------
-    # aggregate_evaluate  — collect distributed accuracy, print summary
-    # ------------------------------------------------------------------
-
-    def aggregate_evaluate(self, rnd, results, failures):
-        aggregated = super().aggregate_evaluate(rnd, results, failures)
+    def aggregate_evaluate(
+        self,
+        server_round: int,
+        results: List[Tuple[ClientProxy, EvaluateRes]],
+        failures: List[Any],
+    ) -> Tuple[Optional[float], Dict[str, Scalar]]:
+        agg_loss, agg_metrics = super().aggregate_evaluate(server_round, results, failures)
 
         if results:
-            acc_vals = [res.metrics.get("accuracy", 0.0) for _, res in results]
-            avg_acc  = sum(acc_vals) / len(acc_vals)
+            total_examples = sum(r.num_examples for _, r in results)
+            dist_mta = sum(
+                r.metrics.get("mta", 0.0) * r.num_examples
+                for _, r in results
+            ) / max(total_examples, 1)
         else:
-            avg_acc = 0.0
+            dist_mta = 0.0
 
-        self.history["round"].append(rnd)
-        self.history["accuracy"].append(avg_acc)
+        self._dist_mta_history.append(dist_mta)
+        print(f"[Round {server_round}] Distributed MTA: {dist_mta:.4f}")
 
-        print(f"[Round {rnd}] Distributed accuracy={avg_acc:.4f}  "
-              f"(failures={len(failures)})")
+        return agg_loss, {"dist_mta": dist_mta}
 
-        if rnd >= self.num_rounds:
+    # ------------------------------------------------------------------
+    # evaluate — called after centralized evaluate_fn
+    # ------------------------------------------------------------------
+
+    def evaluate(
+        self,
+        server_round: int,
+        parameters: Parameters,
+    ) -> Optional[Tuple[float, Dict[str, Scalar]]]:
+        result = super().evaluate(server_round, parameters)
+
+        if result is None:
+            return result
+
+        loss, metrics = result
+        central_mta = float(metrics.get("mta", 0.0))
+        self._central_mta_history.append(central_mta)
+        self._loss_history.append(loss)
+
+        dist_mta = self._dist_mta_history[-1] if self._dist_mta_history else 0.0
+        self._log_round(server_round, central_mta, dist_mta, loss)
+        print(
+            f"[Round {server_round}] Centralized — "
+            f"loss={loss:.4f}, MTA={central_mta:.4f}"
+        )
+
+        if server_round == self.num_rounds:
             self._print_summary()
 
-        return aggregated
+        return loss, metrics
 
-    # ------------------------------------------------------------------
-    # record_centralized_eval  — called externally from evaluate_fn
-    # ------------------------------------------------------------------
-
-    def record_centralized_eval(self, rnd: int, loss: float, accuracy: float):
-        self.central_accuracy_history.append(accuracy)
-        print(f"[Round {rnd}] Centralized accuracy={accuracy:.4f}, loss={loss:.4f}")
-
-    # ------------------------------------------------------------------
-    # internal helpers
-    # ------------------------------------------------------------------
-
-    def _print_summary(self):
-        rounds    = self.history["round"]
-        accs      = self.history["accuracy"]
-        best_rnd  = rounds[accs.index(max(accs))] if accs else "N/A"
-        best_acc  = max(accs) if accs else 0.0
-        final_acc = accs[-1]  if accs else 0.0
-
+    def _print_summary(self) -> None:
         print("\n" + "=" * 60)
-        print(f"  Experiment summary  [{self.simulation_id}]")
-        print(f"  Aggregation : {self.aggregation_method}")
-        print(f"  Rounds      : {self.num_rounds}")
-        print(f"  Clients     : {self.num_clients}")
-        print(f"  Alpha       : {self.alpha}")
-        print(f"  Best acc    : {best_acc:.4f}  (round {best_rnd})")
-        print(f"  Final acc   : {final_acc:.4f}")
-        if self.central_accuracy_history:
-            print(f"  Central acc : {self.central_accuracy_history[-1]:.4f}")
+        print(f"Experiment: {self.simulation_id}")
+        print(f"Rounds completed: {self.num_rounds}")
+        if self._central_mta_history:
+            print(f"Final centralized MTA : {self._central_mta_history[-1]:.4f}")
+            print(f"Peak centralized MTA  : {max(self._central_mta_history):.4f}")
+        if self._dist_mta_history:
+            print(f"Final distributed MTA : {self._dist_mta_history[-1]:.4f}")
+        print(f"Round log saved to    : {self._csv_path}")
         print("=" * 60 + "\n")
