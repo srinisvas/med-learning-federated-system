@@ -1,82 +1,73 @@
-"""Flower server for ISIC 2019 federated learning."""
 import os
 
 import torch
 from flwr.common import Context, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 
-from med_learning_federated_system.state.server_strategy import SaveFedAvgMetricsStrategy
-from med_learning_federated_system.task import (
-    get_resnet_cnn_model, get_weights, load_test_data_for_eval,
+from med_fl_isic.task import (
+    get_isic_model,
+    get_weights,
+    load_test_data_for_eval,
+    test,
+    set_weights,
 )
-from med_learning_federated_system.utils.evaluate import get_evaluate_fn
+from med_fl_isic.server_strategy import ISICFedAvgStrategy
+
+
+def get_evaluate_fn(model: torch.nn.Module, test_loader):
+    """
+    Returns a centralized evaluate_fn compatible with Flower's FedAvg.
+    Called by the server after each round using the global aggregated model.
+    """
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    def evaluate_fn(server_round: int, parameters, config):
+        set_weights(model, parameters)
+        loss, accuracy = test(model, test_loader, device)
+        return loss, {"mta": accuracy}
+
+    return evaluate_fn
 
 
 def server_fn(context: Context):
-    # ------------------------------------------------------------------
-    # Read run config
-    # ------------------------------------------------------------------
-    num_rounds         = int(context.run_config["num-server-rounds"])
-    num_clients        = int(context.run_config["num-clients"])
-    fraction_fit       = float(context.run_config.get("fraction-fit", 0.1))
-    simulation_id      = context.run_config.get("simulation-id", "isic-fedavg")
-    aggregation_method = context.run_config.get("aggregation-method", "fedavg").lower()
-    alpha              = float(context.run_config.get("alpha", 0.5))
+    num_rounds = int(context.run_config["num-server-rounds"])
+    fraction_fit = float(context.run_config.get("fraction-fit", 0.1))
+    num_clients = int(context.run_config.get("num-clients", 100))
+    simulation_id = str(context.run_config.get("simulation-id", "isic-exp"))
 
-    # ------------------------------------------------------------------
-    # Initial model parameters
-    # ------------------------------------------------------------------
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model  = get_resnet_cnn_model()
-    model.to(device)
-
-    # Optionally load a pretrained checkpoint to warm-start the global model
-    pretrained_path = context.run_config.get("pretrained-checkpoint", "")
+    # ---- Model initialisation ----
+    model = get_isic_model()
+    pretrained_path = os.environ.get("ISIC_PRETRAINED_PATH", "")
     if pretrained_path and os.path.isfile(pretrained_path):
-        print(f"Loading pretrained global model from {pretrained_path}")
+        print(f"[Server] Loading pretrained weights from {pretrained_path}")
         model.load_state_dict(torch.load(pretrained_path, map_location="cpu"))
+    else:
+        print("[Server] No pretrained checkpoint found — starting from random init.")
 
-    parameters = ndarrays_to_parameters(get_weights(model))
+    initial_parameters = ndarrays_to_parameters(get_weights(model))
 
-    # ------------------------------------------------------------------
-    # Server-side centralised evaluation data
-    # ------------------------------------------------------------------
-    test_data = load_test_data_for_eval(batch_size=64)
+    # ---- Global test set for centralized evaluation ----
+    test_loader = load_test_data_for_eval(batch_size=64)
+    evaluate_fn = get_evaluate_fn(
+        model=get_isic_model(),   # separate instance from the one above
+        test_loader=test_loader,
+    )
 
-    # ------------------------------------------------------------------
-    # per-round fit config
-    # ------------------------------------------------------------------
-    def on_fit_config_fn(server_round: int) -> dict:
-        return {
-            "current-round": server_round,
-            "alpha":         alpha,
-            # Clients may read these to tune local training
-            "lr":            0.005,
-            "epochs":        2,
-        }
-
-    # ------------------------------------------------------------------
-    # Strategy
-    # ------------------------------------------------------------------
-    eval_model = get_resnet_cnn_model().to(device)
-
-    strategy = SaveFedAvgMetricsStrategy(
+    # ---- Strategy ----
+    strategy = ISICFedAvgStrategy(
+        simulation_id=simulation_id,
+        num_rounds=num_rounds,
+        # FedAvg base params
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_fit,
-        min_fit_clients=int(num_clients * fraction_fit),
+        min_fit_clients=max(1, int(num_clients * fraction_fit)),
         min_available_clients=num_clients,
-        evaluate_fn=get_evaluate_fn(
-            model=eval_model,
-            test_data=test_data,
-            device=device,
-        ),
-        initial_parameters=parameters,
-        on_fit_config_fn=on_fit_config_fn,
-        simulation_id=simulation_id,
-        num_clients=num_clients,
-        num_rounds=num_rounds,
-        aggregation_method=aggregation_method,
-        alpha=alpha,
+        evaluate_fn=evaluate_fn,
+        initial_parameters=initial_parameters,
+        on_fit_config_fn=lambda rnd: {
+            "current-round": rnd,
+        },
     )
 
     config = ServerConfig(num_rounds=num_rounds)
