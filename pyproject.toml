@@ -3,47 +3,44 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "med-learning-federated-system"
+name = "med-fl-isic"
 version = "1.0.0"
-description = "Federated learning on ISIC 2019 skin lesion classification"
+description = "Federated learning for ISIC 2019 skin lesion classification (8-class)"
 license = "Apache-2.0"
 dependencies = [
-    "flwr[simulation]>=1.11,<2.0",
-    "torch>=2.2",
-    "torchvision>=0.17",
-    "pandas>=2.0",
-    "Pillow>=10.0",
-    "numpy>=1.24",
-    "kagglehub>=0.2",
+    "flwr[simulation]>=1.20.0",
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "kagglehub>=0.2.0",
+    "numpy>=1.24.0",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["med_learning_federated_system"]
+packages = ["."]
 
 [tool.flwr.app]
 publisher = "ssubram7"
 
 [tool.flwr.app.components]
-serverapp = "med_learning_federated_system.server_app:app"
-clientapp = "med_learning_federated_system.client_app:app"
+serverapp = "med_fl_isic.server_app:app"
+clientapp = "med_fl_isic.client_app:app"
 
 [tool.flwr.app.config]
-num-server-rounds       = 50
-num-clients             = 100
-fraction-fit            = 0.1
-fraction-evaluate       = 0.1
-local-epochs            = 2
-aggregation-method      = "fedavg"
-alpha                   = 0.9
-simulation-id           = "isic-fedavg-run-01"
-pretrained-checkpoint   = ""
+# Simulation configuration
+num-server-rounds = 50
+fraction-fit = 0.1          # 10% of clients sampled per round (10 of 100)
+local-epochs = 2
+num-clients = 100
+simulation-id = "isic-fedavg-exp1"
+
+# Ray resource config — ISIC images are larger than CIFAR; bump memory
+ray-num-cpus = 2
+ray-num-gpus = 1            # set to 1 if GPU available; shared across virtual clients
 
 [tool.flwr.federations]
 default = "local-simulation"
 
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 100
-
-[tool.flwr.federations.local-simulation.options.backend.client-resources]
-num-cpus = 2
-num-gpus = 0.0
+options.backend.client-resources.num-cpus = 2
+options.backend.client-resources.num-gpus = 0.0
