@@ -1,327 +1,282 @@
-"""med-learning-federated-system: task.py — ISIC 2019 data, model, train/test."""
 import os
 from collections import OrderedDict
+from typing import Tuple, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Dataset
-from torch.nn.utils import parameters_to_vector
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchvision import transforms
+from torchvision.datasets import ImageFolder
 
-from med_learning_federated_system.models.resnet_cnn_model import tiny_resnet18
-from med_learning_federated_system.utils.dirichlet_partition import dirichlet_indices
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-NUM_CLASSES = 8
-
-# Canonical ISIC 2019 label ordering — alphabetical by diagnosis code.
-# These must match the one-hot column order in the ground truth CSV.
-ISIC_CLASSES = [
-    "AK",    # 0 — Actinic Keratosis
-    "BCC",   # 1 — Basal Cell Carcinoma
-    "BKL",   # 2 — Benign Keratosis-like Lesions
-    "DF",    # 3 — Dermatofibroma
-    "MEL",   # 4 — Melanoma
-    "NV",    # 5 — Melanocytic Nevi
-    "SCC",   # 6 — Squamous Cell Carcinoma
-    "VASC",  # 7 — Vascular Lesions
-]
+from med_fl_isic.resnet_cnn_model import med_tiny_resnet18
+from med_fl_isic.drichlet_partition import dirichlet_indices
 
 # ---------------------------------------------------------------------------
-# Paths
+# Configuration — update DATA_ROOT to your kagglehub download path
 # ---------------------------------------------------------------------------
+DATA_ROOT: str = os.environ.get(
+    "ISIC_DATA_ROOT",
+    os.path.join(os.path.dirname(__file__), "data", "isic2019"),
+)
 
-base_dir = os.path.dirname(__file__)
-DATA_DIR  = os.path.join(base_dir, "data", "isic2019")
+ISIC_CLASSES: List[str] = ["AK", "BCC", "BKL", "DF", "MEL", "NV", "SCC", "VASC"]
+NUM_CLASSES: int = 8
+IMG_SIZE: int = 224
 
-# ---------------------------------------------------------------------------
-# Module-level caches — built once per process
-# ---------------------------------------------------------------------------
-
-_metadata_cache  = None   # pandas DataFrame of all samples
-_partition_cache = None   # list[list[int]] — Dirichlet split indices
-
-# ---------------------------------------------------------------------------
-# Model factory
-# ---------------------------------------------------------------------------
-
-def get_resnet_cnn_model(num_classes: int = NUM_CLASSES) -> nn.Module:
-    return tiny_resnet18(num_classes=num_classes, base_width=8)
-
-# ---------------------------------------------------------------------------
-# Weight helpers
-# ---------------------------------------------------------------------------
-
-def get_weights(net):
-    return [val.cpu().numpy() for _, val in net.state_dict().items()]
-
-
-def set_weights(net, parameters):
-    params_dict = zip(net.state_dict().keys(), parameters)
-    state_dict  = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    net.load_state_dict(state_dict, strict=True)
-
-# ---------------------------------------------------------------------------
-# Dataset
-# ---------------------------------------------------------------------------
-
-class ISICDataset(Dataset):
-    """Thin wrapper: list of image paths + integer labels -> (tensor, int)."""
-
-    def __init__(self, image_paths: list, labels: list, transform=None):
-        self.image_paths = image_paths
-        self.labels      = labels
-        self.transform   = transform
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        from PIL import Image
-        img = Image.open(self.image_paths[idx]).convert("RGB")
-        if self.transform:
-            img = self.transform(img)
-        return img, self.labels[idx]
-
-# ---------------------------------------------------------------------------
-# Metadata loader
-# ---------------------------------------------------------------------------
-
-def _load_metadata():
-    """
-    Parse ISIC_2019_Training_GroundTruth.csv and return a DataFrame with
-    columns  path (str)  and  label (int).  Result is cached globally.
-    """
-    global _metadata_cache
-    if _metadata_cache is not None:
-        return _metadata_cache
-
-    import pandas as pd
-
-    csv_path = os.path.join(DATA_DIR, "ISIC_2019_Training_GroundTruth.csv")
-    img_dir  = os.path.join(
-        DATA_DIR,
-        "ISIC_2019_Training_Input",
-        "ISIC_2019_Training_Input",
-    )
-
-    if not os.path.isfile(csv_path):
-        raise RuntimeError(
-            f"ISIC metadata CSV not found at {csv_path}. "
-            "Run setup_data.py first."
-        )
-
-    df = pd.read_csv(csv_path)
-
-    # One-hot columns -> integer label
-    label_cols = [c for c in ISIC_CLASSES if c in df.columns]
-    if not label_cols:
-        raise RuntimeError(
-            f"None of the expected class columns {ISIC_CLASSES} found in CSV. "
-            f"Columns present: {df.columns.tolist()}"
-        )
-    df["label"] = df[label_cols].values.argmax(axis=1)
-    df["path"]  = df["image"].apply(
-        lambda x: os.path.join(img_dir, f"{x}.jpg")
-    )
-
-    # Drop rows whose image file is missing on disk
-    df = df[df["path"].apply(os.path.isfile)].reset_index(drop=True)
-
-    if len(df) == 0:
-        raise RuntimeError(
-            f"No valid image files found under {img_dir}. "
-            "Check that setup_data.py completed successfully."
-        )
-
-    _metadata_cache = df
-    return df
+# ImageNet normalisation stats — standard starting point for dermoscopy models
+_MEAN = (0.485, 0.456, 0.406)
+_STD  = (0.229, 0.224, 0.225)
 
 # ---------------------------------------------------------------------------
 # Transforms
-# ISIC images are 450x600 px; resize then crop to 224x224.
-# Mean/std estimated from the ISIC 2019 training distribution.
 # ---------------------------------------------------------------------------
-
-_MEAN = (0.7012, 0.5517, 0.5714)
-_STD  = (0.1517, 0.1703, 0.1814)
-
-TRAIN_TRANSFORM = transforms.Compose([
-    transforms.Resize(256),
-    transforms.RandomCrop(224),
+TRAIN_TRANSFORMS = transforms.Compose([
+    transforms.RandomResizedCrop(IMG_SIZE, scale=(0.7, 1.0)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2,
-                           saturation=0.1, hue=0.05),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
     transforms.ToTensor(),
     transforms.Normalize(_MEAN, _STD),
 ])
 
-TEST_TRANSFORM = transforms.Compose([
+TEST_TRANSFORMS = transforms.Compose([
     transforms.Resize(256),
-    transforms.CenterCrop(224),
+    transforms.CenterCrop(IMG_SIZE),
     transforms.ToTensor(),
     transforms.Normalize(_MEAN, _STD),
 ])
 
 # ---------------------------------------------------------------------------
-# load_data — per-client federated split
+# Module-level dataset/partition cache — loaded once per process
 # ---------------------------------------------------------------------------
+_full_dataset: Optional[ImageFolder] = None
+_train_indices: Optional[List[List[int]]] = None   # per-client train index lists
+_test_indices:  Optional[List[int]]       = None   # global held-out test indices
+_TEST_SPLIT_RATIO: float = 0.15
+_DIRICHLET_ALPHA: float = 0.5          # lower alpha -> more non-IID
+_DIRICHLET_SEED:  int   = 42
+
+
+def _load_and_partition(num_partitions: int, alpha: float) -> None:
+    """
+    Loads the full ISIC ImageFolder dataset exactly once, performs an
+    80/15 stratified split into train/test, then applies Dirichlet
+    partitioning over the train portion across `num_partitions` clients.
+
+    Results are cached in module globals so subsequent calls are free.
+    """
+    global _full_dataset, _train_indices, _test_indices
+
+    if _train_indices is not None:
+        return  # already partitioned
+
+    if not os.path.isdir(DATA_ROOT):
+        raise RuntimeError(
+            f"ISIC data root not found: {DATA_ROOT}\n"
+            "Set the ISIC_DATA_ROOT environment variable to the path returned by\n"
+            "kagglehub.dataset_download('salviohexia/isic-2019-skin-lesion-images-for-classification')"
+        )
+
+    # Load with test transforms — train subset will override its transform
+    _full_dataset = ImageFolder(root=DATA_ROOT, transform=TEST_TRANSFORMS)
+    all_labels = np.array(_full_dataset.targets)
+    num_total = len(all_labels)
+
+    # Stratified train/test split: preserve class proportions in both halves
+    rng = np.random.default_rng(_DIRICHLET_SEED)
+    train_idx_all, test_idx_all = [], []
+    for cls in range(NUM_CLASSES):
+        cls_idx = np.where(all_labels == cls)[0]
+        rng.shuffle(cls_idx)
+        n_test = max(1, int(len(cls_idx) * _TEST_SPLIT_RATIO))
+        test_idx_all.extend(cls_idx[:n_test].tolist())
+        train_idx_all.extend(cls_idx[n_test:].tolist())
+
+    _test_indices = test_idx_all
+    train_labels = all_labels[train_idx_all]
+
+    # Dirichlet partition over the training pool
+    raw_partitions = dirichlet_indices(
+        labels=train_labels,
+        num_partitions=num_partitions,
+        alpha=alpha,
+        seed=_DIRICHLET_SEED,
+    )
+    # Map local partition indices back to global dataset indices
+    train_idx_arr = np.array(train_idx_all)
+    _train_indices = [train_idx_arr[part].tolist() for part in raw_partitions]
+
+
+def _make_weighted_sampler(dataset: ImageFolder, indices: List[int]) -> WeightedRandomSampler:
+    """
+    Build a WeightedRandomSampler that up-samples minority classes within
+    the provided index subset. This is critical for ISIC where NV dominates.
+    """
+    targets = np.array(dataset.targets)[indices]
+    class_counts = np.bincount(targets, minlength=NUM_CLASSES).astype(float)
+    class_counts = np.where(class_counts == 0, 1.0, class_counts)
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[targets]
+    return WeightedRandomSampler(
+        weights=torch.from_numpy(sample_weights).float(),
+        num_samples=len(indices),
+        replacement=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_isic_model(num_classes: int = NUM_CLASSES, base_width: int = 32) -> nn.Module:
+    return med_tiny_resnet18(num_classes=num_classes, base_width=base_width)
+
 
 def load_data(
     partition_id: int,
     num_partitions: int,
-    alpha_val: float = 0.9,
+    alpha_val: float = _DIRICHLET_ALPHA,
     batch_size: int = 32,
-):
+) -> Tuple[DataLoader, DataLoader]:
     """
-    Return (train_loader, test_loader) for a single federated client.
+    Returns (train_loader, val_loader) for a given client partition.
 
-    The full dataset is split non-IID across clients using a Dirichlet draw
-    on integer labels (alpha_val controls heterogeneity).  The partition map
-    is built once and reused across all subsequent calls in the same process.
-
-    Each client's slice is then divided 80/20 into local train and test sets.
+    train_loader uses WeightedRandomSampler to handle ISIC class imbalance.
+    val_loader is the global held-out test set (same for all clients).
+    Using a shared val set is standard in cross-silo FL evaluation.
     """
-    global _partition_cache
+    _load_and_partition(num_partitions, alpha_val)
 
-    df         = _load_metadata()
-    all_paths  = df["path"].tolist()
-    all_labels = df["label"].tolist()
+    train_indices = _train_indices[partition_id]
 
-    if _partition_cache is None:
-        _partition_cache = dirichlet_indices(
-            labels=all_labels,
-            num_partitions=num_partitions,
-            alpha=alpha_val,
-            seed=42,
-        )
+    # Build a Subset with TRAIN_TRANSFORMS via a transform-override wrapper
+    train_subset = _TransformSubset(_full_dataset, train_indices, TRAIN_TRANSFORMS)
+    val_subset   = Subset(_full_dataset, _test_indices)  # uses TEST_TRANSFORMS
 
-    indices = _partition_cache[partition_id]
-
-    split      = int(0.8 * len(indices))
-    train_idx  = indices[:split]
-    test_idx   = indices[split:]
-
-    train_ds = ISICDataset(
-        [all_paths[i]  for i in train_idx],
-        [all_labels[i] for i in train_idx],
-        transform=TRAIN_TRANSFORM,
-    )
-    test_ds = ISICDataset(
-        [all_paths[i]  for i in test_idx],
-        [all_labels[i] for i in test_idx],
-        transform=TEST_TRANSFORM,
-    )
-
-    pin = torch.cuda.is_available()
+    sampler = _make_weighted_sampler(_full_dataset, train_indices)
 
     train_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=0, pin_memory=pin,
+        train_subset,
+        batch_size=batch_size,
+        sampler=sampler,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+        drop_last=True,
     )
-    test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False,
-        num_workers=0, pin_memory=pin,
-    )
-
-    return train_loader, test_loader
-
-# ---------------------------------------------------------------------------
-# load_test_data_for_eval — global held-out set for server-side evaluation
-# ---------------------------------------------------------------------------
-
-def load_test_data_for_eval(batch_size: int = 64):
-    """
-    Return a DataLoader over a fixed 10% held-out slice of the full dataset
-    for centralised server-side evaluation.
-
-    This sample is drawn with a fixed random state so it is deterministic
-    across runs.  It may overlap with client partitions — acceptable for a
-    baseline; strict separation can be enforced later if needed.
-    """
-    df      = _load_metadata()
-    eval_df = df.sample(frac=0.10, random_state=0).reset_index(drop=True)
-
-    dataset = ISICDataset(
-        eval_df["path"].tolist(),
-        eval_df["label"].tolist(),
-        transform=TEST_TRANSFORM,
-    )
-    return DataLoader(
-        dataset,
+    val_loader = DataLoader(
+        val_subset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
+    return train_loader, val_loader
+
+
+def load_test_data_for_eval(batch_size: int = 64) -> DataLoader:
+    """
+    Returns the global held-out test DataLoader for centralized server-side eval.
+    Requires that load_data() has been called at least once to initialize
+    the partition cache (server calls this after constructing strategy).
+    """
+    # Trigger partition init with sensible defaults if not yet done
+    if _test_indices is None:
+        _load_and_partition(num_partitions=100, alpha=_DIRICHLET_ALPHA)
+    return DataLoader(
+        Subset(_full_dataset, _test_indices),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
         pin_memory=torch.cuda.is_available(),
     )
 
-# ---------------------------------------------------------------------------
-# train
-# ---------------------------------------------------------------------------
 
-def train(net, training_data, epochs: int, device, lr: float = 0.005):
+def train(
+    net: nn.Module,
+    train_loader: DataLoader,
+    epochs: int,
+    device: torch.device,
+    lr: float = 0.01,
+) -> Tuple[float, torch.Tensor]:
     """
-    SGD + CosineAnnealingLR with label smoothing.
-    Expects plain (image_tensor, label_int) batches from ISICDataset.
-    Returns (avg_loss, final_param_vector).
+    Standard SGD training loop. Returns (avg_loss, final_param_vector).
+
+    Cross-entropy loss without additional class weighting here because
+    the DataLoader already balances classes via WeightedRandomSampler.
     """
+    from torch.nn.utils import parameters_to_vector
+
     net.to(device)
     net.train()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.05).to(device)
-    optimizer = torch.optim.SGD(
-        net.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=len(training_data) * epochs
-    )
-
-    running_loss = 0.0
+    total_loss, steps = 0.0, 0
     for _ in range(epochs):
-        for images, labels in training_data:
+        for images, labels in train_loader:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             loss = criterion(net(images), labels)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(net.parameters(), max_norm=5.0)
             optimizer.step()
-            scheduler.step()
-            running_loss += loss.item()
+            total_loss += loss.item()
+            steps += 1
 
-    avg_loss  = running_loss / max(1, len(training_data))
-    final_vec = parameters_to_vector(net.parameters()).detach().cpu().clone()
+    avg_loss = total_loss / max(steps, 1)
+    final_vec = parameters_to_vector(net.parameters()).detach().cpu()
     return avg_loss, final_vec
 
-# ---------------------------------------------------------------------------
-# test
-# ---------------------------------------------------------------------------
 
-def test(net, test_data, device):
-    """
-    Return (avg_loss, accuracy) over test_data.
-    Expects plain (image_tensor, label_int) batches from ISICDataset.
-    """
+def test(net: nn.Module, test_loader: DataLoader, device: torch.device) -> Tuple[float, float]:
+    """Returns (avg_loss, accuracy)."""
     net.to(device)
     net.eval()
-
-    criterion   = nn.CrossEntropyLoss()
-    correct     = 0
-    total       = 0
-    total_loss  = 0.0
-
+    criterion = nn.CrossEntropyLoss()
+    correct, total, loss = 0, 0, 0.0
     with torch.no_grad():
-        for images, labels in test_data:
+        for images, labels in test_loader:
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             outputs = net(images)
-            total_loss += criterion(outputs, labels).item()
+            loss += criterion(outputs, labels).item()
             _, predicted = torch.max(outputs, 1)
-            total   += labels.size(0)
+            total += labels.size(0)
             correct += (predicted == labels).sum().item()
+    return loss / max(len(test_loader), 1), correct / max(total, 1)
 
-    return total_loss / max(1, len(test_data)), correct / max(1, total)
+
+def get_weights(net: nn.Module) -> list:
+    return [val.cpu().numpy() for _, val in net.state_dict().items()]
+
+
+def set_weights(net: nn.Module, parameters: list) -> None:
+    params_dict = zip(net.state_dict().keys(), parameters)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    net.load_state_dict(state_dict, strict=True)
+
+
+class _TransformSubset(torch.utils.data.Dataset):
+    """
+    A Subset that applies a different transform than the base dataset.
+    Used to apply TRAIN_TRANSFORMS to the training partition while the
+    base ImageFolder holds TEST_TRANSFORMS (used for val/test).
+    """
+
+    def __init__(self, dataset: ImageFolder, indices: List[int], transform):
+        self.dataset = dataset
+        self.indices = indices
+        self.transform = transform
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, idx: int):
+        # Load PIL image directly from the base dataset's loader, bypass transform
+        path, label = self.dataset.samples[self.indices[idx]]
+        image = self.dataset.loader(path)
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, label
