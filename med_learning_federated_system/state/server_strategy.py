@@ -1,13 +1,3 @@
-"""
-server_strategy.py — FedAvg strategy for ISIC 2019 FL with centralized MTA tracking.
-
-Stripped of all attack/defense machinery. Responsibilities:
-  - Standard FedAvg aggregation (inherited from fl.server.strategy.FedAvg).
-  - Per-round distributed MTA aggregation (weighted average across clients).
-  - CSV logging: one row per round with round, centralized MTA, distributed MTA, loss.
-  - Console summary at the end of training.
-"""
-
 import csv
 import os
 from typing import Any, Dict, List, Optional, Tuple
