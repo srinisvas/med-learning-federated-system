@@ -22,12 +22,12 @@ packages = ["."]
 publisher = "ssubram7"
 
 [tool.flwr.app.components]
-serverapp = "med_fl_isic.server_app:app"
-clientapp = "med_fl_isic.client_app:app"
+serverapp = "med_learning_federated_system.server_app:app"
+clientapp = "med_learning_federated_system.client_app:app"
 
 [tool.flwr.app.config]
 # Simulation configuration
-num-server-rounds = 50
+num-server-rounds = 100
 fraction-fit = 0.1          # 10% of clients sampled per round (10 of 100)
 local-epochs = 2
 num-clients = 100
