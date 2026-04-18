@@ -1,55 +1,38 @@
-"""Dirichlet-based non-IID partition utility."""
 import numpy as np
-from typing import List
 
+def dirichlet_indices(labels, num_partitions: int, alpha: float, seed: int = 42):
+    """Partition data indices using a Dirichlet distribution."""
+    rng = np.random.default_rng(seed)
+    labels = np.asarray(labels)
+    num_classes = int(labels.max()) + 1
 
-def dirichlet_indices(
-    labels: List[int],
-    num_partitions: int,
-    alpha: float = 0.5,
-    seed: int = 42,
-) -> List[List[int]]:
-    """
-    Partition a dataset into `num_partitions` non-IID subsets using a
-    Dirichlet distribution over class labels.
+    # Prepare container for indices per client
+    client_indices = [[] for _ in range(num_partitions)]
 
-    Args:
-        labels:          Integer label for every sample in the dataset.
-        num_partitions:  Number of federated clients.
-        alpha:           Dirichlet concentration parameter.
-                         Lower -> more heterogeneous.  Typical range: 0.1 – 1.0.
-        seed:            Random seed for reproducibility.
+    for c in range(num_classes):
+        cls_idx = np.where(labels == c)[0]
+        rng.shuffle(cls_idx)
 
-    Returns:
-        List of length `num_partitions`, where each element is a list of
-        integer indices into the original dataset.
-    """
-    rng    = np.random.default_rng(seed)
-    labels = np.array(labels)
-    classes = np.unique(labels)
+        # Draw proportions for this class across clients
+        p = rng.dirichlet(alpha * np.ones(num_partitions))
+        counts = (p * len(cls_idx)).astype(int)
 
-    # Indices grouped by class
-    class_indices = {c: np.where(labels == c)[0].tolist() for c in classes}
+        # Fix rounding so total matches
+        diff = len(cls_idx) - counts.sum()
+        if diff > 0:
+            # give the leftover to the largest-probability clients
+            rem_order = np.argsort(-p)[:diff]
+            counts[rem_order] += 1
 
-    # Each partition accumulates indices here
-    partitions: List[List[int]] = [[] for _ in range(num_partitions)]
+        # Slice the class indices accordingly
+        start = 0
+        for i, k in enumerate(counts):
+            if k > 0:
+                client_indices[i].extend(cls_idx[start:start + k].tolist())
+                start += k
 
-    for c in classes:
-        idx = class_indices[c]
-        rng.shuffle(idx)
+    # Shuffle each client’s indices for randomness
+    for i in range(num_partitions):
+        rng.shuffle(client_indices[i])
 
-        # Dirichlet proportions for this class across all partitions
-        proportions = rng.dirichlet(alpha=np.full(num_partitions, alpha))
-
-        # Convert proportions to split points
-        proportions = (np.cumsum(proportions) * len(idx)).astype(int)[:-1]
-        splits = np.split(idx, proportions)
-
-        for p, split in enumerate(splits):
-            partitions[p].extend(split.tolist())
-
-    # Shuffle each partition so samples aren't sorted by class
-    for p in partitions:
-        rng.shuffle(p)
-
-    return partitions
+    return client_indices
