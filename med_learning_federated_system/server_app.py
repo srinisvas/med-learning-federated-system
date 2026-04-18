@@ -4,7 +4,7 @@ import torch
 from flwr.common import Context, ndarrays_to_parameters
 from flwr.server import ServerApp, ServerAppComponents, ServerConfig
 
-from med_fl_isic.task import (
+from med_learning_federated_system.task import (
     get_isic_model,
     get_weights,
     load_test_data_for_eval,

@@ -9,8 +9,8 @@ from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
 
-from med_fl_isic.resnet_cnn_model import med_tiny_resnet18
-from med_fl_isic.drichlet_partition import dirichlet_indices
+from med_learning_federated_system.models.resnet_cnn_model import med_tiny_resnet18
+from med_learning_federated_system.utils.dirichlet_partition import dirichlet_indices
 
 # ---------------------------------------------------------------------------
 # Configuration — update DATA_ROOT to your kagglehub download path

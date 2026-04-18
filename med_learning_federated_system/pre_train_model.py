@@ -6,7 +6,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision.datasets import ImageFolder
 import numpy as np
 
-from med_fl_isic.task import (
+from med_learning_federated_system.task import (
     DATA_ROOT,
     TRAIN_TRANSFORMS,
     TEST_TRANSFORMS,

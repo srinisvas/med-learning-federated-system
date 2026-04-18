@@ -15,7 +15,7 @@ import torch
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
 
-from med_fl_isic.task import (
+from med_learning_federated_system.task import (
     get_isic_model,
     get_weights,
     set_weights,
