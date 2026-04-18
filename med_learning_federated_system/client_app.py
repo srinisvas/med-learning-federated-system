@@ -1,4 +1,13 @@
-"""Flower client for ISIC 2019 federated learning — no attack logic."""
+"""
+client_app.py — Pure benign Flower client for ISIC 2019 federated learning.
+
+No backdoor, no attack logic, no constrain-and-scale. Each client:
+  1. Receives global parameters from server.
+  2. Trains locally for `local_epochs` using its Dirichlet partition.
+  3. Returns updated weights and basic metrics (train_loss, epochs, lr).
+  4. Evaluates on the global test set (same held-out split for all clients).
+"""
+
 import random
 from collections import OrderedDict
 
@@ -6,88 +15,80 @@ import torch
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
 
-from med_learning_federated_system.task import (
-    get_weights, load_data, set_weights, test, train, get_resnet_cnn_model,
+from med_fl_isic.task import (
+    get_isic_model,
+    get_weights,
+    set_weights,
+    load_data,
+    test,
+    train,
 )
 
 
+class ISICFlowerClient(NumPyClient):
 
-class FlowerClient(NumPyClient):
-    def __init__(self, net, local_epochs: int, context: Context):
-        self.net           = net
-        self.local_epochs  = local_epochs
-        self.context       = context
-        self.partition_id  = int(context.node_config["partition-id"])
-        self.num_partitions = int(context.node_config["num-partitions"])
-        self.device        = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    def __init__(self, net: torch.nn.Module, local_epochs: int, context: Context):
+        self.net = net
+        self.local_epochs = local_epochs
+        self.context = context
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.net.to(self.device)
 
-        self.training_set = None
-        self.test_set     = None
+        self.partition_id = int(context.node_config["partition-id"])
+        self.num_partitions = int(context.node_config["num-partitions"])
 
-    # ------------------------------------------------------------------
-    # fit
-    # ------------------------------------------------------------------
+        # Lazy-loaded — avoid loading data until fit/evaluate is actually called
+        self._train_loader = None
+        self._val_loader = None
+
+    def _ensure_data_loaded(self) -> None:
+        if self._train_loader is None:
+            self._train_loader, self._val_loader = load_data(
+                partition_id=self.partition_id,
+                num_partitions=self.num_partitions,
+            )
+
+    def get_properties(self, config):
+        return {"partition_id": str(self.partition_id)}
 
     def fit(self, parameters, config):
+        self._ensure_data_loaded()
         set_weights(self.net, parameters)
 
-        # Lazy-load partition data on first call
-        if self.training_set is None:
-            alpha_val = float(config.get("alpha", 0.5))
-            self.training_set, _ = load_data(
-                self.partition_id, self.num_partitions, alpha_val=alpha_val
-            )
-
-        # Allow the server to optionally vary LR and epochs per round
-        lr     = float(config.get("lr",     random.choice([0.003, 0.004, 0.005])))
-        epochs = int(config.get("epochs",   random.choice([1, 2, 3])))
-
-        current_round = config.get("current-round", "N/A")
-        print(
-            f"[Client {self.partition_id}] Round {current_round} | "
-            f"epochs={epochs}, lr={lr:.4f}"
-        )
+        # Mild heterogeneity across clients — small random variation in lr/epochs
+        # keeps the FL simulation realistic without requiring per-client config.
+        lr = float(config.get("local-lr", random.choice([0.005, 0.008, 0.01])))
+        epochs = int(config.get("local-epochs", self.local_epochs))
 
         train_loss, _ = train(
-            self.net, self.training_set, epochs, self.device, lr
+            net=self.net,
+            train_loader=self._train_loader,
+            epochs=epochs,
+            device=self.device,
+            lr=lr,
         )
 
-        return (
-            get_weights(self.net),
-            len(self.training_set.dataset),
-            {"train_loss": train_loss},
-        )
-
-    # ------------------------------------------------------------------
-    # evaluate
-    # ------------------------------------------------------------------
+        return get_weights(self.net), len(self._train_loader.dataset), {
+            "train_loss": float(train_loss),
+            "local_epochs": epochs,
+            "local_lr": lr,
+        }
 
     def evaluate(self, parameters, config):
-        if self.test_set is None:
-            alpha_val = float(config.get("alpha", 0.5))
-            _, self.test_set = load_data(
-                self.partition_id, self.num_partitions, alpha_val=alpha_val
-            )
-
+        self._ensure_data_loaded()
         set_weights(self.net, parameters)
-        loss, accuracy = test(self.net, self.test_set, self.device)
-
+        loss, accuracy = test(self.net, self._val_loader, self.device)
         print(
-            f"[Client {self.partition_id}] eval: "
-            f"loss={loss:.4f}, accuracy={accuracy:.4f}"
+            f"[Client {self.partition_id}] eval — "
+            f"loss={loss:.4f}, acc={accuracy:.4f}"
         )
-        return loss, len(self.test_set.dataset), {"accuracy": accuracy}
+        return float(loss), len(self._val_loader.dataset), {"mta": float(accuracy)}
 
-
-# ---------------------------------------------------------------------------
-# client_fn + ClientApp
-# ---------------------------------------------------------------------------
 
 def client_fn(context: Context):
-    net          = get_resnet_cnn_model()
-    local_epochs = int(context.run_config["local-epochs"])
-    return FlowerClient(net, local_epochs, context).to_client()
+    net = get_isic_model()
+    local_epochs = int(context.run_config.get("local-epochs", 2))
+    return ISICFlowerClient(net, local_epochs, context).to_client()
 
 
 app = ClientApp(client_fn=client_fn)
