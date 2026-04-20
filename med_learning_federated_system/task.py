@@ -137,7 +137,7 @@ def load_data(
     partition_id: int,
     num_partitions: int,
     alpha_val: float = _DIRICHLET_ALPHA,
-    batch_size: int = 32,
+    batch_size: int = 16,
 ) -> Tuple[DataLoader, DataLoader]:
     """
     Returns (train_loader, val_loader) for a given client partition.
