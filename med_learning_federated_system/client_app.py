@@ -31,7 +31,8 @@ class ISICFlowerClient(NumPyClient):
         self.net = net
         self.local_epochs = local_epochs
         self.context = context
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        #self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
         self.net.to(self.device)
 
         self.partition_id = int(context.node_config["partition-id"])
