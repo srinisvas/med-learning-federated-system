@@ -160,16 +160,16 @@ def load_data(
         train_subset,
         batch_size=batch_size,
         sampler=sampler,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
+        num_workers=0,
+        pin_memory=False,
         drop_last=True,
     )
     val_loader = DataLoader(
         val_subset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
+        num_workers=0,
+        pin_memory=False,
     )
     return train_loader, val_loader
 
@@ -188,7 +188,7 @@ def load_test_data_for_eval(batch_size: int = 64) -> DataLoader:
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=True,
     )
 
 
