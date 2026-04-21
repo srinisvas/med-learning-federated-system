@@ -26,16 +26,11 @@ serverapp = "med_learning_federated_system.server_app:app"
 clientapp = "med_learning_federated_system.client_app:app"
 
 [tool.flwr.app.config]
-# Simulation configuration
 num-server-rounds = 10
-fraction-fit = 0.5          # 10% of clients sampled per round (10 of 100)
+fraction-fit = 0.5          # 50% of 10 clients = 5 sampled per round
 local-epochs = 2
 num-clients = 10
 simulation-id = "isic-fedavg-exp1"
-
-# Ray resource config — ISIC images are larger than CIFAR; bump memory
-ray-num-cpus = 2
-ray-num-gpus = 1            # set to 1 if GPU available; shared across virtual clients
 
 [tool.flwr.federations]
 default = "local-simulation"
@@ -43,4 +38,4 @@ default = "local-simulation"
 [tool.flwr.federations.local-simulation]
 options.num-supernodes = 10
 options.backend.client-resources.num-cpus = 1
-options.backend.client-resources.num-gpus = 0.0
+options.backend.client-resources.num-gpus = 0.2  # 5 clients × 0.2 = 1.0 GPU, all run concurrently

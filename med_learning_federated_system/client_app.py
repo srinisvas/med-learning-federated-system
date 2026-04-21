@@ -1,11 +1,9 @@
 """
 client_app.py — Pure benign Flower client for ISIC 2019 federated learning.
 
-No backdoor, no attack logic, no constrain-and-scale. Each client:
-  1. Receives global parameters from server.
-  2. Trains locally for `local_epochs` using its Dirichlet partition.
-  3. Returns updated weights and basic metrics (train_loss, epochs, lr).
-  4. Evaluates on the global test set (same held-out split for all clients).
+Clients use GPU via fractional allocation (num-gpus=0.2 in pyproject.toml).
+Ray assigns each actor 20% of the GPU, allowing 5 clients to run concurrently
+on a single A100 without CUDA context conflicts.
 """
 
 import random
@@ -31,16 +29,14 @@ class ISICFlowerClient(NumPyClient):
         self.net = net
         self.local_epochs = local_epochs
         self.context = context
-        #self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.device = torch.device("cpu")
+        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.net.to(self.device)
 
-        self.partition_id = int(context.node_config["partition-id"])
+        self.partition_id  = int(context.node_config["partition-id"])
         self.num_partitions = int(context.node_config["num-partitions"])
 
-        # Lazy-loaded — avoid loading data until fit/evaluate is actually called
         self._train_loader = None
-        self._val_loader = None
+        self._val_loader   = None
 
     def _ensure_data_loaded(self) -> None:
         if self._train_loader is None:
@@ -56,9 +52,7 @@ class ISICFlowerClient(NumPyClient):
         self._ensure_data_loaded()
         set_weights(self.net, parameters)
 
-        # Mild heterogeneity across clients — small random variation in lr/epochs
-        # keeps the FL simulation realistic without requiring per-client config.
-        lr = float(config.get("local-lr", random.choice([0.005, 0.008, 0.01])))
+        lr     = float(config.get("local-lr", random.choice([0.005, 0.008, 0.01])))
         epochs = int(config.get("local-epochs", self.local_epochs))
 
         train_loss, _ = train(
@@ -79,15 +73,12 @@ class ISICFlowerClient(NumPyClient):
         self._ensure_data_loaded()
         set_weights(self.net, parameters)
         loss, accuracy = test(self.net, self._val_loader, self.device)
-        print(
-            f"[Client {self.partition_id}] eval — "
-            f"loss={loss:.4f}, acc={accuracy:.4f}"
-        )
+        print(f"[Client {self.partition_id}] eval — loss={loss:.4f}, acc={accuracy:.4f}")
         return float(loss), len(self._val_loader.dataset), {"mta": float(accuracy)}
 
 
 def client_fn(context: Context):
-    net = get_isic_model()
+    net          = get_isic_model()
     local_epochs = int(context.run_config.get("local-epochs", 2))
     return ISICFlowerClient(net, local_epochs, context).to_client()
 
