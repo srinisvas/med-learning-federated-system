@@ -2,7 +2,10 @@ import os
 from collections import OrderedDict
 from typing import Tuple, List, Optional
 
+import cv2
 import numpy as np
+from PIL import Image
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
@@ -28,13 +31,49 @@ _MEAN = (0.485, 0.456, 0.406)
 _STD  = (0.229, 0.224, 0.225)
 
 # ---------------------------------------------------------------------------
+# CLAHE contrast enhancement
+# ---------------------------------------------------------------------------
+
+class CLAHETransform:
+    """
+    Contrast-Limited Adaptive Histogram Equalization on the L channel of LAB.
+    Applied as the first transform step — enhances lesion boundary contrast
+    before any spatial augmentation. Standard preprocessing for dermoscopy.
+    """
+    def __init__(self, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)):
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clip_limit,
+            tileGridSize=tile_grid_size,
+        )
+
+    def __call__(self, img: Image.Image) -> Image.Image:
+        arr = np.array(img)
+        if len(arr.shape) == 3:
+            lab = cv2.cvtColor(arr, cv2.COLOR_RGB2LAB)
+            l, a, b = cv2.split(lab)
+            l = self.clahe.apply(l)
+            lab = cv2.merge((l, a, b))
+            arr = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        else:
+            arr = self.clahe.apply(arr)
+        return Image.fromarray(arr)
+
+
+# ---------------------------------------------------------------------------
 # Transforms
 # ---------------------------------------------------------------------------
+
 TRAIN_TRANSFORMS = transforms.Compose([
+    CLAHETransform(clip_limit=2.0, tile_grid_size=(8, 8)),   # contrast enhancement first
     transforms.RandomResizedCrop(IMG_SIZE, scale=(0.7, 1.0)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
+    transforms.RandomRotation(20),
     transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+    transforms.RandomPerspective(distortion_scale=0.1, p=0.3),
+    transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.3),
+    transforms.RandomAutocontrast(p=0.3),
+    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
     transforms.ToTensor(),
     transforms.Normalize(_MEAN, _STD),
 ])
@@ -49,9 +88,9 @@ TEST_TRANSFORMS = transforms.Compose([
 # ---------------------------------------------------------------------------
 # Module-level cache
 # ---------------------------------------------------------------------------
-_full_dataset:   Optional[ImageFolder]    = None
-_train_indices:  Optional[List[List[int]]] = None
-_test_indices:   Optional[List[int]]       = None
+_full_dataset:  Optional[ImageFolder]     = None
+_train_indices: Optional[List[List[int]]] = None
+_test_indices:  Optional[List[int]]       = None
 
 _TEST_SPLIT_RATIO: float = 0.15
 _DIRICHLET_ALPHA:  float = 0.5
@@ -101,9 +140,9 @@ def _load_and_partition(num_partitions: int, alpha: float) -> None:
 
 
 def _make_weighted_sampler(dataset: ImageFolder, indices: List[int]) -> WeightedRandomSampler:
-    targets       = np.array(dataset.targets)[indices]
-    class_counts  = np.bincount(targets, minlength=NUM_CLASSES).astype(float)
-    class_counts  = np.where(class_counts == 0, 1.0, class_counts)
+    targets        = np.array(dataset.targets)[indices]
+    class_counts   = np.bincount(targets, minlength=NUM_CLASSES).astype(float)
+    class_counts   = np.where(class_counts == 0, 1.0, class_counts)
     sample_weights = (1.0 / class_counts)[targets]
     return WeightedRandomSampler(
         weights=torch.from_numpy(sample_weights).float(),
@@ -131,8 +170,8 @@ def load_data(
 
     num_workers=0 and pin_memory=False — clients run as Ray actor subprocesses.
     Forking DataLoader workers inside Ray actors causes memory bloat and
-    instability. pin_memory only helps when the target device is GPU and
-    the DataLoader runs in the same process context, which is not the case here.
+    instability. pin_memory only helps when the DataLoader runs in the same
+    process context as the GPU, which is not the case inside Ray actors.
     """
     _load_and_partition(num_partitions, alpha_val)
 
@@ -162,11 +201,8 @@ def load_data(
 def load_test_data_for_eval(batch_size: int = 32) -> DataLoader:
     """
     Global held-out test DataLoader for server-side centralized evaluation.
-
-    Uses FL_NUM_CLIENTS env var to match the partition count used during
-    client load_data() calls — ensures the train/test split is identical.
-    num_workers=2 and pin_memory=True are safe here because this runs in
-    the server's main process which has legitimate GPU access.
+    Uses FL_NUM_CLIENTS env var to match the partition count used by clients.
+    num_workers=2 and pin_memory=True are safe — runs in the server main process.
     """
     if _test_indices is None:
         num_partitions = int(os.environ.get("FL_NUM_CLIENTS", "10"))
@@ -242,9 +278,9 @@ def set_weights(net: nn.Module, parameters: list) -> None:
 class _TransformSubset(torch.utils.data.Dataset):
     """
     Subset with per-sample transform override. Loads PIL images directly
-    from the base dataset's loader, bypassing the base transform, then
-    applies the provided transform. Allows train/test transforms to differ
-    while sharing a single ImageFolder instance in memory.
+    from the base dataset's loader bypassing the base transform, then applies
+    the provided transform. Allows train/test transforms to differ while
+    sharing a single ImageFolder instance in memory.
     """
 
     def __init__(self, dataset: ImageFolder, indices: List[int], transform):

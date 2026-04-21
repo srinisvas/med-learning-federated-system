@@ -18,11 +18,13 @@ def get_evaluate_fn(model: torch.nn.Module, test_loader):
     """
     Lazy CUDA init — defers model.to(device) until the first evaluate_fn call.
 
-    Flower runs server_fn in a background thread. If we call model.to(cuda)
-    eagerly here, it races with Ray's worker pool initialization and hits
-    "CUDA device busy or unavailable" in exclusive GPU mode. Deferring to
-    the first actual call guarantees Ray has fully initialized before any
-    CUDA context is created in the server thread.
+    Flower runs server_fn in a background thread. Calling model.to(cuda) eagerly
+    races with Ray's worker pool initialization and causes "CUDA device busy".
+    Deferring to the first actual call guarantees Ray has fully initialized first.
+
+    The same model instance is passed to ISICFedAvgStrategy as final_eval_model,
+    so after the final round's evaluate_fn call the model holds the final weights
+    and is already on the correct device — ready for full metrics computation.
     """
     _state = {"device": None}
 
@@ -54,19 +56,22 @@ def server_fn(context: Context):
 
     initial_parameters = ndarrays_to_parameters(get_weights(model))
 
-    # ---- Global test set for centralized evaluation ----
-    # num_workers=2 and pin_memory=True are safe here — server runs in the
-    # main process and has legitimate GPU access after Ray has initialized.
+    # ---- Global test set ----
     test_loader = load_test_data_for_eval(batch_size=32)
-    evaluate_fn = get_evaluate_fn(
-        model=get_isic_model(),  # separate instance from the one above
-        test_loader=test_loader,
-    )
+
+    # eval_model is a separate instance used by evaluate_fn each round.
+    # We pass it to the strategy so that after the final round's evaluate_fn
+    # sets the final weights on it, the strategy can run the full metrics suite
+    # directly without needing to reload weights or reconstruct a loader.
+    eval_model = get_isic_model()
+    evaluate_fn = get_evaluate_fn(model=eval_model, test_loader=test_loader)
 
     # ---- Strategy ----
     strategy = ISICFedAvgStrategy(
         simulation_id=simulation_id,
         num_rounds=num_rounds,
+        final_eval_model=eval_model,
+        final_eval_loader=test_loader,
         fraction_fit=fraction_fit,
         fraction_evaluate=fraction_fit,
         min_fit_clients=max(1, int(num_clients * fraction_fit)),
