@@ -101,7 +101,7 @@ def main():
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total params: {total_params:,} | Trainable: {trainable_params:,}")
 
-    epochs        = 100
+    epochs        = 75
     warmup_epochs = 5
     criterion     = nn.CrossEntropyLoss(label_smoothing=0.1)
     optimizer     = get_optimizer(model)
