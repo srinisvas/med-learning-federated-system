@@ -46,16 +46,18 @@ def build_centralized_loaders(batch_size: int = 32):
     train_subset = _TransformSubset(full_ds, train_idx, TRAIN_TRANSFORMS)
     test_subset  = torch.utils.data.Subset(full_ds, test_idx)
 
-    num_workers = 4 if torch.cuda.is_available() else 2
+    num_workers = 2 if torch.cuda.is_available() else 1
     pin_memory  = torch.cuda.is_available()
 
     train_loader = DataLoader(
         train_subset, batch_size=batch_size, sampler=sampler,
         num_workers=num_workers, pin_memory=pin_memory, drop_last=True,
+        persistent_workers=True, prefetch_factor=2,
     )
     test_loader = DataLoader(
         test_subset, batch_size=batch_size, shuffle=False,
         num_workers=num_workers, pin_memory=pin_memory,
+        persistent_workers=True,
     )
     return train_loader, test_loader
 
