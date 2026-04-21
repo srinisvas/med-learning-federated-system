@@ -12,6 +12,8 @@ from collections import OrderedDict
 import torch
 from flwr.client import ClientApp, NumPyClient
 from flwr.common import Context
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 from med_learning_federated_system.task import (
     get_isic_model,

@@ -1,5 +1,6 @@
 import csv
 import os
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -62,8 +63,13 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         self._final_eval_model  = final_eval_model
         self._final_eval_loader = final_eval_loader
 
+        # _central_mta_history includes round 0 (init eval) + rounds 1..N  -> length N+1
+        # _dist_mta_history includes rounds 1..N only                        -> length N
+        # Keep track of round numbers separately to avoid x-axis mismatch.
         self._central_mta_history: List[float] = []
+        self._central_rounds:      List[int]   = []
         self._dist_mta_history:    List[float] = []
+        self._dist_rounds:         List[int]   = []
         self._loss_history:        List[float] = []
 
         self._pending_central: Optional[Tuple[int, float, float]] = None
@@ -99,6 +105,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         central_mta = float(metrics.get("mta", 0.0))
 
         self._central_mta_history.append(central_mta)
+        self._central_rounds.append(server_round)
         self._loss_history.append(loss)
         self._pending_central = (server_round, loss, central_mta)
 
@@ -126,6 +133,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
             dist_mta = 0.0
 
         self._dist_mta_history.append(dist_mta)
+        self._dist_rounds.append(server_round)
         print(f"[Round {server_round}] Distributed MTA: {dist_mta:.4f}")
 
         if self._pending_central is not None:
@@ -152,8 +160,6 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
 
         model  = self._final_eval_model
         loader = self._final_eval_loader
-
-        # Infer device from where the model currently lives
         device = next(model.parameters()).device
 
         model.eval()
@@ -182,7 +188,6 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         f1        = f1_score(all_labels, all_preds, average="weighted", zero_division=0)
         cm        = confusion_matrix(all_labels, all_preds)
 
-        # Per-class metrics
         per_class_precision = precision_score(all_labels, all_preds, average=None, zero_division=0)
         per_class_recall    = recall_score(all_labels, all_preds, average=None, zero_division=0)
         per_class_f1        = f1_score(all_labels, all_preds, average=None, zero_division=0)
@@ -190,7 +195,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         print("\n" + "=" * 60)
         print(f"Final FL Evaluation — {self.simulation_id}")
         print("=" * 60)
-        print(f"Accuracy          : {acc*100:.2f}%")
+        print(f"Accuracy           : {acc*100:.2f}%")
         print(f"Weighted Precision : {precision:.4f}")
         print(f"Weighted Recall    : {recall:.4f}")
         print(f"Weighted F1        : {f1:.4f}")
@@ -204,14 +209,13 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
             )
         print("=" * 60)
 
-        # Save metrics CSV
         metrics_csv = os.path.join(LOG_DIR, f"{self.simulation_id}_final_metrics.csv")
         with open(metrics_csv, "w", newline="") as f:
             w = csv.writer(f)
             w.writerow(["class", "precision", "recall", "f1"])
             for i, cls in enumerate(ISIC_CLASS_NAMES):
                 w.writerow([cls, f"{per_class_precision[i]:.4f}",
-                            f"{per_class_recall[i]:.4f}", f"{per_class_f1[i]:.4f}"])
+                             f"{per_class_recall[i]:.4f}", f"{per_class_f1[i]:.4f}"])
             w.writerow(["weighted", f"{precision:.4f}", f"{recall:.4f}", f"{f1:.4f}"])
         print(f"[Metrics] Per-class CSV saved: {metrics_csv}")
 
@@ -233,7 +237,6 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         ax.set_ylabel("True Label")
         ax.set_title(f"Confusion Matrix — {self.simulation_id}")
 
-        # Annotate cells
         thresh = cm.max() / 2.0
         for i in range(cm.shape[0]):
             for j in range(cm.shape[1]):
@@ -290,15 +293,21 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         print(f"[Metrics] PR curves saved: {path}")
 
     def _plot_training_curves(self) -> None:
-        rounds = list(range(1, len(self._central_mta_history) + 1))
+        """
+        Plot MTA and loss over rounds.
 
+        _central_mta_history includes round 0 (init eval) through round N -> use _central_rounds
+        _dist_mta_history includes rounds 1..N only                        -> use _dist_rounds
+        Storing round numbers explicitly avoids any x-axis length mismatch.
+        """
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        # MTA curves
-        axes[0].plot(rounds, self._central_mta_history, label="Centralized MTA", marker="o", markersize=3)
+        # MTA curves — central starts from round 0, distributed from round 1
+        axes[0].plot(self._central_rounds, self._central_mta_history,
+                     label="Centralized MTA", marker="o", markersize=3)
         if self._dist_mta_history:
-            axes[0].plot(rounds, self._dist_mta_history, label="Distributed MTA",
-                         marker="s", markersize=3, linestyle="--")
+            axes[0].plot(self._dist_rounds, self._dist_mta_history,
+                         label="Distributed MTA", marker="s", markersize=3, linestyle="--")
         axes[0].set_xlabel("Round")
         axes[0].set_ylabel("Accuracy")
         axes[0].set_title("MTA over FL Rounds")
@@ -306,8 +315,8 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         axes[0].grid(True, alpha=0.3)
 
         # Loss curve
-        axes[1].plot(rounds, self._loss_history, label="Centralized Loss",
-                     color="orange", marker="o", markersize=3)
+        axes[1].plot(self._central_rounds, self._loss_history,
+                     label="Centralized Loss", color="orange", marker="o", markersize=3)
         axes[1].set_xlabel("Round")
         axes[1].set_ylabel("Loss")
         axes[1].set_title("Centralized Loss over FL Rounds")
