@@ -48,7 +48,7 @@ def server_fn(context: Context):
     initial_parameters = ndarrays_to_parameters(get_weights(model))
 
     # ---- Global test set for centralized evaluation ----
-    test_loader = load_test_data_for_eval(batch_size=64)
+    test_loader = load_test_data_for_eval(batch_size=16)
     evaluate_fn = get_evaluate_fn(
         model=get_isic_model(),   # separate instance from the one above
         test_loader=test_loader,

@@ -28,7 +28,7 @@ clientapp = "med_learning_federated_system.client_app:app"
 [tool.flwr.app.config]
 # Simulation configuration
 num-server-rounds = 10
-fraction-fit = 0.1          # 10% of clients sampled per round (10 of 100)
+fraction-fit = 0.5          # 10% of clients sampled per round (10 of 100)
 local-epochs = 2
 num-clients = 10
 simulation-id = "isic-fedavg-exp1"
