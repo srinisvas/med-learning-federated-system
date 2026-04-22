@@ -60,10 +60,10 @@ def server_fn(context: Context):
     test_loader = load_test_data_for_eval(batch_size=32)
 
     # eval_model is a separate instance used by evaluate_fn each round.
-    # We pass it to the strategy so that after the final round's evaluate_fn
-    # sets the final weights on it, the strategy can run the full metrics suite
-    # directly without needing to reload weights or reconstruct a loader.
-    eval_model = get_isic_model()
+    # Passed to strategy so after the final round's evaluate_fn sets
+    # the final weights on it, strategy can run the full metrics suite
+    # without needing to reload weights or reconstruct a loader.
+    eval_model  = get_isic_model()
     evaluate_fn = get_evaluate_fn(model=eval_model, test_loader=test_loader)
 
     # ---- Strategy ----
@@ -78,7 +78,15 @@ def server_fn(context: Context):
         min_available_clients=num_clients,
         evaluate_fn=evaluate_fn,
         initial_parameters=initial_parameters,
-        on_fit_config_fn=lambda rnd: {"current-round": rnd},
+        # Fixed LR passed to every client every round.
+        # lr=0.001 is the AdamW head LR; backbone gets lr*0.1=0.0001
+        # automatically via differential LR in task.train().
+        # This matches the pre-training backbone/head LR ratio and
+        # prevents catastrophic forgetting of ImageNet features.
+        on_fit_config_fn=lambda rnd: {
+            "current-round": rnd,
+            "local-lr": 0.001,
+        },
     )
 
     config = ServerConfig(num_rounds=num_rounds)

@@ -64,7 +64,7 @@ class CLAHETransform:
 # ---------------------------------------------------------------------------
 
 TRAIN_TRANSFORMS = transforms.Compose([
-    CLAHETransform(clip_limit=2.0, tile_grid_size=(8, 8)),   # contrast enhancement first
+    CLAHETransform(clip_limit=2.0, tile_grid_size=(8, 8)),
     transforms.RandomResizedCrop(IMG_SIZE, scale=(0.7, 1.0)),
     transforms.RandomHorizontalFlip(),
     transforms.RandomVerticalFlip(),
@@ -221,14 +221,35 @@ def train(
     train_loader: DataLoader,
     epochs: int,
     device: torch.device,
-    lr: float = 0.01,
+    lr: float = 0.001,
 ) -> Tuple[float, torch.Tensor]:
+    """
+    AdamW with differential LRs — mirrors the pre-training optimizer setup.
+
+    Why this matters: FL clients start from a pretrained EfficientNet-B0
+    checkpoint. SGD at 0.01 (the old default) destroys pretrained features
+    in the first few steps — the round 0→1 accuracy drop is direct evidence
+    of this. AdamW with backbone LR 10x lower than head LR matches the
+    pre-training regime and prevents catastrophic forgetting.
+
+    backbone LR = lr * 0.1  (conservative — preserve pretrained features)
+    head LR     = lr        (faster adaptation — head adjusts to local data)
+    """
     from torch.nn.utils import parameters_to_vector
 
     net.to(device)
     net.train()
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(), lr=lr, momentum=0.9, weight_decay=1e-4)
+
+    # Same head param names work for both EfficientNet-B0 and ResNet18
+    head_param_names = {"classifier.1.weight", "classifier.1.bias", "fc.weight", "fc.bias"}
+    backbone_params  = [p for n, p in net.named_parameters() if n not in head_param_names]
+    head_params      = [p for n, p in net.named_parameters() if n in head_param_names]
+
+    optimizer = torch.optim.AdamW([
+        {"params": backbone_params, "lr": lr * 0.1},  # backbone: 10x lower
+        {"params": head_params,     "lr": lr},         # head: full LR
+    ], weight_decay=1e-4)
 
     total_loss, steps = 0.0, 0
     for _ in range(epochs):
