@@ -1,22 +1,26 @@
 """
 pre_train_model.py — Optimized centralized fine-tuning for ISIC 2019.
 
-Enhancements over baseline:
+Enhancements:
   1. AMP (mixed precision)         — ~2x faster per batch on A100, no accuracy loss
   2. Batch size 128 + scaled LRs   — fewer steps/epoch, better GPU utilization
-  3. torch.compile                 — ~10-20% additional speedup via graph fusion
-  4. Freeze-then-unfreeze backbone — head stabilizes during warmup before
+  3. Freeze-then-unfreeze backbone — head stabilizes during warmup before
                                      full fine-tuning begins, improves convergence
-  5. Mixup augmentation            — blends training pairs, +1-3% accuracy on
+  4. Mixup augmentation            — blends training pairs, +1-3% accuracy on
                                      imbalanced medical datasets
 
+Note: torch.compile is intentionally disabled. The cluster's GCCcore 13.3.0
+has corrupted debug sections in libgcc.a which causes Triton kernel compilation
+to flood stderr with /usr/bin/ld warnings. The 10-20% speedup is not worth the
+noise. Re-enable by setting TORCH_COMPILE_ENABLE=1 if the cluster is updated.
+
 Safe to run in parallel with FL:
-  - ISIC_DATA_ROOT env var — point at same /dev/shm dataset
+  - ISIC_DATA_ROOT env var — point at same /dev/shm dataset as FL
   - All outputs go to results/centralized/ — no collision with FL results/
   - matplotlib.use("Agg") — no display, safe on HPC
 
 Usage:
-    export ISIC_DATA_ROOT="/dev/shm/isic2019_30pct"   # or full dataset path
+    export ISIC_DATA_ROOT="/dev/shm/isic2019_30pct"
     python med_learning_federated_system/pre_train_model.py
 """
 
@@ -25,6 +29,7 @@ import math
 import os
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -57,18 +62,18 @@ OUT_DIR = os.path.join(os.environ.get("FL_LOG_DIR", "results"), "centralized")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # ---------------------------------------------------------------------------
-# Hyperparameters — batch 128 with linear LR scaling from batch 32 baseline
-# Linear scaling rule: LR scales proportionally with batch size.
-# Baseline: backbone=1e-4, head=1e-3 at batch 32
-# Batch 128 = 4x -> backbone=4e-4, head=4e-3
+# Hyperparameters
+# Linear LR scaling rule: baseline backbone=1e-4, head=1e-3 at batch 32.
+# Batch 128 = 4x -> backbone=4e-4, head=4e-3.
 # ---------------------------------------------------------------------------
-BATCH_SIZE     = 128
-BACKBONE_LR    = 4e-4
-HEAD_LR        = 4e-3
-WEIGHT_DECAY   = 1e-4
-EPOCHS         = 75
-WARMUP_EPOCHS  = 5    # backbone frozen for this many epochs
-MIXUP_ALPHA    = 0.2  # Beta distribution parameter for mixup
+BATCH_SIZE    = 128
+BACKBONE_LR   = 4e-4
+HEAD_LR       = 4e-3
+WEIGHT_DECAY  = 1e-4
+EPOCHS        = 30
+WARMUP_EPOCHS = 5      # backbone frozen during these epochs
+MIXUP_ALPHA   = 0.2    # Beta distribution parameter for mixup
+AMP_ENABLED   = torch.cuda.is_available()
 
 
 # ---------------------------------------------------------------------------
@@ -116,15 +121,10 @@ def build_centralized_loaders(batch_size: int = BATCH_SIZE):
 
 
 # ---------------------------------------------------------------------------
-# Optimizer — differential LRs, backbone 10x lower than head
+# Optimizer — differential LRs, works for both EfficientNet and ResNet heads
 # ---------------------------------------------------------------------------
 
 def get_optimizer(model: nn.Module, backbone_lr: float, head_lr: float):
-    """
-    EfficientNet-B0 head is model.classifier[1].
-    ResNet18 head is model.fc.
-    This covers both by checking for neither 'fc' nor 'classifier.1' in backbone.
-    """
     head_param_names = {"classifier.1.weight", "classifier.1.bias", "fc.weight", "fc.bias"}
     backbone_params  = [p for n, p in model.named_parameters() if n not in head_param_names]
     head_params      = [p for n, p in model.named_parameters() if n in head_param_names]
@@ -149,15 +149,12 @@ def warmup_cosine_schedule(optimizer, epoch: int, warmup_epochs: int, total_epoc
 
 # ---------------------------------------------------------------------------
 # Mixup augmentation
-# Blends pairs of training samples and their labels.
-# loss = lam * CE(pred, label_a) + (1-lam) * CE(pred, label_b)
 # ---------------------------------------------------------------------------
 
 def mixup_batch(images: torch.Tensor, labels: torch.Tensor, alpha: float = MIXUP_ALPHA):
     lam = float(np.random.beta(alpha, alpha)) if alpha > 0 else 1.0
     idx = torch.randperm(images.size(0), device=images.device)
-    mixed_images = lam * images + (1.0 - lam) * images[idx]
-    return mixed_images, labels, labels[idx], lam
+    return lam * images + (1.0 - lam) * images[idx], labels, labels[idx], lam
 
 
 # ---------------------------------------------------------------------------
@@ -165,9 +162,7 @@ def mixup_batch(images: torch.Tensor, labels: torch.Tensor, alpha: float = MIXUP
 # ---------------------------------------------------------------------------
 
 def freeze_backbone(model: nn.Module) -> None:
-    """Freeze all layers except the classification head."""
     for name, param in model.named_parameters():
-        # EfficientNet head: classifier.1 | ResNet head: fc
         if "classifier.1" not in name and "fc" not in name:
             param.requires_grad = False
 
@@ -178,7 +173,7 @@ def unfreeze_backbone(model: nn.Module) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Evaluation — returns all_preds explicitly
+# Evaluation
 # ---------------------------------------------------------------------------
 
 def evaluate_model(model, loader, device):
@@ -187,11 +182,11 @@ def evaluate_model(model, loader, device):
     all_preds, all_labels, all_probs = [], [], []
     with torch.no_grad():
         for images, labels in loader:
-            images  = images.to(device, non_blocking=True)
-            labels  = labels.to(device, non_blocking=True)
-            with torch.cuda.amp.autocast():
+            images = images.to(device, non_blocking=True)
+            labels = labels.to(device, non_blocking=True)
+            with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
                 outputs = model(images)
-            probs = torch.softmax(outputs, dim=1)
+            probs = torch.softmax(outputs.float(), dim=1)
             preds = torch.argmax(outputs, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -212,7 +207,7 @@ def evaluate_model(model, loader, device):
 
 
 # ---------------------------------------------------------------------------
-# Final evaluation and plots — identical schema to FL server_strategy
+# Final evaluation — identical schema to FL server_strategy
 # ---------------------------------------------------------------------------
 
 def run_final_evaluation(model, loader, device, train_losses, accuracies):
@@ -253,6 +248,10 @@ def run_final_evaluation(model, loader, device, train_losses, accuracies):
     _plot_pr_curves(all_labels, all_probs)
     _plot_training_curves(train_losses, accuracies)
 
+
+# ---------------------------------------------------------------------------
+# Plots — identical style to FL server_strategy plots
+# ---------------------------------------------------------------------------
 
 def _plot_confusion_matrix(cm: np.ndarray) -> None:
     fig, ax = plt.subplots(figsize=(9, 7))
@@ -335,6 +334,7 @@ def main():
     print(f"Data root   : {DATA_ROOT}")
     print(f"Output dir  : {OUT_DIR}")
     print(f"Batch size  : {BATCH_SIZE}")
+    print(f"AMP enabled : {AMP_ENABLED}")
     print(f"Epochs      : {EPOCHS}  (backbone frozen for first {WARMUP_EPOCHS})")
 
     torch.manual_seed(42)
@@ -346,22 +346,12 @@ def main():
     print(f"Train batches: {len(train_loader)} | Test batches: {len(test_loader)}")
 
     model = get_isic_model().to(device)
-
-    # torch.compile — graph-level fusion, ~10-20% speedup on top of AMP
-    # Falls back gracefully on older PyTorch versions
-    try:
-        model = torch.compile(model)
-        print("[Setup] torch.compile enabled")
-    except Exception:
-        print("[Setup] torch.compile unavailable — running in eager mode")
-
     print(f"Total params    : {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Trainable params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    # AMP GradScaler — manages loss scaling for float16 gradients
-    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
+    # AMP GradScaler using updated API (torch.amp instead of torch.cuda.amp)
+    scaler = torch.amp.GradScaler("cuda", enabled=AMP_ENABLED)
 
     # Phase 1: freeze backbone, train head only during warmup
     freeze_backbone(model)
@@ -373,11 +363,10 @@ def main():
 
     for epoch in range(EPOCHS):
 
-        # Phase 2: unfreeze backbone after warmup
+        # Unfreeze backbone after warmup and rebuild optimizer
         if epoch == WARMUP_EPOCHS and not backbone_unfrozen:
             unfreeze_backbone(model)
             backbone_unfrozen = True
-            # Rebuild optimizer so all parameters are tracked
             optimizer = get_optimizer(model, backbone_lr=BACKBONE_LR, head_lr=HEAD_LR)
             print(f"[Phase 2] Backbone unfrozen — full fine-tuning begins at epoch {epoch+1}")
 
@@ -386,7 +375,6 @@ def main():
         )
         current_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
-        # Training
         model.train()
         running_loss, steps = 0.0, 0
 
@@ -394,20 +382,17 @@ def main():
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
 
-            # Mixup
             mixed_images, labels_a, labels_b, lam = mixup_batch(images, labels, MIXUP_ALPHA)
 
             optimizer.zero_grad(set_to_none=True)
 
-            # AMP forward pass
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            with torch.amp.autocast("cuda", enabled=AMP_ENABLED):
                 outputs = model(mixed_images)
                 loss = (
                     lam * criterion(outputs, labels_a)
                     + (1.0 - lam) * criterion(outputs, labels_b)
                 )
 
-            # AMP backward + step
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
@@ -430,7 +415,6 @@ def main():
             f"| lr=[{current_lrs[0]:.2e}, {current_lrs[1]:.2e}]"
         )
 
-        # Save checkpoint only at the final epoch
         if epoch == EPOCHS - 1:
             torch.save(model.state_dict(), "isic_centralized_resnet18.pth")
             print(f"  -> Checkpoint saved: isic_centralized_resnet18.pth (acc={acc*100:.2f}%)")
