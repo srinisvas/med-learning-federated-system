@@ -35,16 +35,8 @@ _STD  = (0.229, 0.224, 0.225)
 # ---------------------------------------------------------------------------
 
 class CLAHETransform:
-    """
-    Contrast-Limited Adaptive Histogram Equalization on the L channel of LAB.
-    Applied as the first transform step — enhances lesion boundary contrast
-    before any spatial augmentation. Standard preprocessing for dermoscopy.
-    """
     def __init__(self, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)):
-        self.clahe = cv2.createCLAHE(
-            clipLimit=clip_limit,
-            tileGridSize=tile_grid_size,
-        )
+        self.clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
 
     def __call__(self, img: Image.Image) -> Image.Image:
         arr = np.array(img)
@@ -93,16 +85,17 @@ _train_indices: Optional[List[List[int]]] = None
 _test_indices:  Optional[List[int]]       = None
 
 _TEST_SPLIT_RATIO: float = 0.15
-_DIRICHLET_ALPHA:  float = 0.5
 _DIRICHLET_SEED:   int   = 42
+
+# α=1.0 — near-IID. With only 10 clients, α=0.5 creates severe class skew
+# per client that causes gradient conflicts across the 5 sampled per round,
+# producing the oscillation pattern (loss drops, MTA stays flat).
+# α=1.0 keeps class proportions close to global distribution — each client's
+# gradient points in roughly the same direction, aggregation is coherent.
+_DIRICHLET_ALPHA:  float = 1.0
 
 
 def _load_and_partition(num_partitions: int, alpha: float) -> None:
-    """
-    Loads the full ISIC ImageFolder dataset exactly once, stratified 85/15
-    train/test split, then Dirichlet partition across num_partitions clients.
-    Cached in module globals — subsequent calls are free.
-    """
     global _full_dataset, _train_indices, _test_indices
 
     if _train_indices is not None:
@@ -165,14 +158,6 @@ def load_data(
     alpha_val: float = _DIRICHLET_ALPHA,
     batch_size: int = 16,
 ) -> Tuple[DataLoader, DataLoader]:
-    """
-    Returns (train_loader, val_loader) for a given client partition.
-
-    num_workers=0 and pin_memory=False — clients run as Ray actor subprocesses.
-    Forking DataLoader workers inside Ray actors causes memory bloat and
-    instability. pin_memory only helps when the DataLoader runs in the same
-    process context as the GPU, which is not the case inside Ray actors.
-    """
     _load_and_partition(num_partitions, alpha_val)
 
     train_indices = _train_indices[partition_id]
@@ -181,38 +166,24 @@ def load_data(
     sampler       = _make_weighted_sampler(_full_dataset, train_indices)
 
     train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        sampler=sampler,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=True,
+        train_subset, batch_size=batch_size, sampler=sampler,
+        num_workers=0, pin_memory=False, drop_last=True,
     )
     val_loader = DataLoader(
-        val_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
+        val_subset, batch_size=batch_size, shuffle=False,
+        num_workers=0, pin_memory=False,
     )
     return train_loader, val_loader
 
 
 def load_test_data_for_eval(batch_size: int = 32) -> DataLoader:
-    """
-    Global held-out test DataLoader for server-side centralized evaluation.
-    Uses FL_NUM_CLIENTS env var to match the partition count used by clients.
-    num_workers=2 and pin_memory=True are safe — runs in the server main process.
-    """
     if _test_indices is None:
         num_partitions = int(os.environ.get("FL_NUM_CLIENTS", "10"))
         _load_and_partition(num_partitions=num_partitions, alpha=_DIRICHLET_ALPHA)
     return DataLoader(
         Subset(_full_dataset, _test_indices),
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=2,
-        pin_memory=True,
+        batch_size=batch_size, shuffle=False,
+        num_workers=2, pin_memory=True,
     )
 
 
@@ -221,19 +192,26 @@ def train(
     train_loader: DataLoader,
     epochs: int,
     device: torch.device,
-    lr: float = 0.001,
+    lr: float = 0.0005,
 ) -> Tuple[float, torch.Tensor]:
     """
-    AdamW with differential LRs — mirrors the pre-training optimizer setup.
+    SGD with Nesterov momentum and differential LRs for FL fine-tuning.
 
-    Why this matters: FL clients start from a pretrained EfficientNet-B0
-    checkpoint. SGD at 0.01 (the old default) destroys pretrained features
-    in the first few steps — the round 0→1 accuracy drop is direct evidence
-    of this. AdamW with backbone LR 10x lower than head LR matches the
-    pre-training regime and prevents catastrophic forgetting.
+    Why SGD over AdamW in FL:
+    AdamW maintains per-parameter moment estimates (m, v) that accumulate
+    across thousands of steps in centralized training. In FL the optimizer
+    is re-initialized from scratch every round — those estimates never build
+    up, so every round starts with unregulated gradient steps. With 5 clients
+    pulling in different directions this compounds into the divergence pattern
+    (loss drops, MTA oscillates). SGD has no per-parameter state to corrupt
+    between rounds and behaves predictably with a fixed LR.
 
-    backbone LR = lr * 0.1  (conservative — preserve pretrained features)
-    head LR     = lr        (faster adaptation — head adjusts to local data)
+    Nesterov momentum adds look-ahead which helps convergence on smooth
+    loss surfaces typical of fine-tuning.
+
+    Differential LRs:
+      backbone = lr * 0.1 = 0.00005  (very conservative — preserve features)
+      head     = lr       = 0.0005   (adapts to local class distribution)
     """
     from torch.nn.utils import parameters_to_vector
 
@@ -241,15 +219,14 @@ def train(
     net.train()
     criterion = nn.CrossEntropyLoss()
 
-    # Same head param names work for both EfficientNet-B0 and ResNet18
     head_param_names = {"classifier.1.weight", "classifier.1.bias", "fc.weight", "fc.bias"}
     backbone_params  = [p for n, p in net.named_parameters() if n not in head_param_names]
     head_params      = [p for n, p in net.named_parameters() if n in head_param_names]
 
-    optimizer = torch.optim.AdamW([
-        {"params": backbone_params, "lr": lr * 0.1},  # backbone: 10x lower
+    optimizer = torch.optim.SGD([
+        {"params": backbone_params, "lr": lr * 0.1},  # backbone: very conservative
         {"params": head_params,     "lr": lr},         # head: full LR
-    ], weight_decay=1e-4)
+    ], momentum=0.9, weight_decay=1e-4, nesterov=True)
 
     total_loss, steps = 0.0, 0
     for _ in range(epochs):
@@ -297,13 +274,6 @@ def set_weights(net: nn.Module, parameters: list) -> None:
 
 
 class _TransformSubset(torch.utils.data.Dataset):
-    """
-    Subset with per-sample transform override. Loads PIL images directly
-    from the base dataset's loader bypassing the base transform, then applies
-    the provided transform. Allows train/test transforms to differ while
-    sharing a single ImageFolder instance in memory.
-    """
-
     def __init__(self, dataset: ImageFolder, indices: List[int], transform):
         self.dataset   = dataset
         self.indices   = indices

@@ -91,5 +91,4 @@ def client_fn(context: Context):
     local_epochs = int(context.run_config.get("local-epochs", 2))
     return ISICFlowerClient(net, local_epochs, context).to_client()
 
-
 app = ClientApp(client_fn=client_fn)

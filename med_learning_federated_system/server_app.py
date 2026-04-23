@@ -15,17 +15,6 @@ from med_learning_federated_system.state.server_strategy import ISICFedAvgStrate
 
 
 def get_evaluate_fn(model: torch.nn.Module, test_loader):
-    """
-    Lazy CUDA init — defers model.to(device) until the first evaluate_fn call.
-
-    Flower runs server_fn in a background thread. Calling model.to(cuda) eagerly
-    races with Ray's worker pool initialization and causes "CUDA device busy".
-    Deferring to the first actual call guarantees Ray has fully initialized first.
-
-    The same model instance is passed to ISICFedAvgStrategy as final_eval_model,
-    so after the final round's evaluate_fn call the model holds the final weights
-    and is already on the correct device — ready for full metrics computation.
-    """
     _state = {"device": None}
 
     def evaluate_fn(server_round: int, parameters, config):
@@ -45,7 +34,6 @@ def server_fn(context: Context):
     num_clients   = int(context.run_config.get("num-clients", 10))
     simulation_id = str(context.run_config.get("simulation-id", "isic-exp"))
 
-    # ---- Model initialisation ----
     model = get_isic_model()
     pretrained_path = os.environ.get("ISIC_PRETRAINED_PATH", "")
     if pretrained_path and os.path.isfile(pretrained_path):
@@ -55,18 +43,10 @@ def server_fn(context: Context):
         print("[Server] No pretrained checkpoint found — starting from random init.")
 
     initial_parameters = ndarrays_to_parameters(get_weights(model))
-
-    # ---- Global test set ----
     test_loader = load_test_data_for_eval(batch_size=32)
-
-    # eval_model is a separate instance used by evaluate_fn each round.
-    # Passed to strategy so after the final round's evaluate_fn sets
-    # the final weights on it, strategy can run the full metrics suite
-    # without needing to reload weights or reconstruct a loader.
     eval_model  = get_isic_model()
     evaluate_fn = get_evaluate_fn(model=eval_model, test_loader=test_loader)
 
-    # ---- Strategy ----
     strategy = ISICFedAvgStrategy(
         simulation_id=simulation_id,
         num_rounds=num_rounds,
@@ -78,14 +58,14 @@ def server_fn(context: Context):
         min_available_clients=num_clients,
         evaluate_fn=evaluate_fn,
         initial_parameters=initial_parameters,
-        # Fixed LR passed to every client every round.
-        # lr=0.001 is the AdamW head LR; backbone gets lr*0.1=0.0001
-        # automatically via differential LR in task.train().
-        # This matches the pre-training backbone/head LR ratio and
-        # prevents catastrophic forgetting of ImageNet features.
+        # SGD in task.train() splits this as:
+        #   backbone LR = 0.0005 * 0.1 = 0.00005  (very conservative)
+        #   head LR     = 0.0005                   (adapts to local data)
+        # Lower than the AdamW regime because SGD at equivalent effective
+        # LR is more aggressive per step without adaptive dampening.
         on_fit_config_fn=lambda rnd: {
             "current-round": rnd,
-            "local-lr": 0.001,
+            "local-lr": 0.0005,
         },
     )
 
