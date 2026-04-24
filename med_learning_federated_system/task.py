@@ -192,26 +192,24 @@ def train(
     train_loader: DataLoader,
     epochs: int,
     device: torch.device,
-    lr: float = 0.0005,
+    lr: float = 0.001,
 ) -> Tuple[float, torch.Tensor]:
     """
-    SGD with Nesterov momentum and differential LRs for FL fine-tuning.
+    AdamW with differential LRs for FL fine-tuning with local-epochs=1.
 
-    Why SGD over AdamW in FL:
-    AdamW maintains per-parameter moment estimates (m, v) that accumulate
-    across thousands of steps in centralized training. In FL the optimizer
-    is re-initialized from scratch every round — those estimates never build
-    up, so every round starts with unregulated gradient steps. With 5 clients
-    pulling in different directions this compounds into the divergence pattern
-    (loss drops, MTA oscillates). SGD has no per-parameter state to corrupt
-    between rounds and behaves predictably with a fixed LR.
-
-    Nesterov momentum adds look-ahead which helps convergence on smooth
-    loss surfaces typical of fine-tuning.
+    Why AdamW works here with local-epochs=1:
+    The key insight is that AdamW's stateless re-initialization per round is
+    only harmful when local-epochs is high (3+), because many gradient steps
+    without momentum dampening causes overfitting to local data. With
+    local-epochs=1 (~80 steps), the re-initialization has minimal impact —
+    the model barely moves before aggregation. AdamW's adaptive per-parameter
+    scaling then becomes an advantage: it makes meaningful progress even with
+    a single pass, whereas SGD at the same LR makes steps too small to escape
+    the pretrained minimum in just 80 steps.
 
     Differential LRs:
-      backbone = lr * 0.1 = 0.00005  (very conservative — preserve features)
-      head     = lr       = 0.0005   (adapts to local class distribution)
+      backbone = lr * 0.1 = 0.0001  (conservative — preserve pretrained features)
+      head     = lr       = 0.001   (adapts to local class distribution)
     """
     from torch.nn.utils import parameters_to_vector
 
@@ -223,10 +221,10 @@ def train(
     backbone_params  = [p for n, p in net.named_parameters() if n not in head_param_names]
     head_params      = [p for n, p in net.named_parameters() if n in head_param_names]
 
-    optimizer = torch.optim.SGD([
-        {"params": backbone_params, "lr": lr * 0.1},  # backbone: very conservative
+    optimizer = torch.optim.AdamW([
+        {"params": backbone_params, "lr": lr * 0.1},  # backbone: 10x lower
         {"params": head_params,     "lr": lr},         # head: full LR
-    ], momentum=0.9, weight_decay=1e-4, nesterov=True)
+    ], weight_decay=1e-4)
 
     total_loss, steps = 0.0, 0
     for _ in range(epochs):
