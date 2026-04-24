@@ -4,9 +4,9 @@ import numpy as np
 from pathlib import Path
 
 SRC  = Path("/gpfs/home/s001/ssubram7/gscratch/isic2019")
-DST  = Path("/dev/shm/isic2019/")
+DST  = Path("/dev/shm/isic2019_50pct/")
 CLASSES = ["AK", "BCC", "BKL", "DF", "MEL", "NV", "SCC", "VASC"]
-SAMPLE_RATIO = 1.0
+SAMPLE_RATIO = 0.5
 SEED = 42
 
 rng = np.random.default_rng(SEED)
