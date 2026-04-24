@@ -188,7 +188,7 @@ def run_final_evaluation(model, loader, device, train_losses, accuracies):
     per_class_f = f1_score(all_labels, all_preds, average=None, zero_division=0)
 
     print("\n" + "=" * 60)
-    print("Final Centralized Continuation — ISIC 2019")
+    print("Final Centralized")
     print("=" * 60)
     print(f"Starting point     : ~70%  (from isic_pretrained_70pct.pth)")
     print(f"Final accuracy     : {acc*100:.2f}%")
@@ -226,7 +226,7 @@ def _plot_confusion_matrix(cm):
     ax.set_xticklabels(ISIC_CLASS_NAMES, rotation=45, ha="right")
     ax.set_yticklabels(ISIC_CLASS_NAMES)
     ax.set_xlabel("Predicted Label"); ax.set_ylabel("True Label")
-    ax.set_title("Confusion Matrix — Centralized Continuation")
+    ax.set_title("Confusion Matrix - Centralized Training")
     thresh = cm.max() / 2.0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
@@ -246,7 +246,7 @@ def _plot_roc_curves(all_labels, all_probs):
         ax.plot(fpr, tpr, label=f"{cls} (AUC={auc(fpr, tpr):.3f})")
     ax.plot([0, 1], [0, 1], "k--", linewidth=0.8)
     ax.set_xlabel("FPR"); ax.set_ylabel("TPR")
-    ax.set_title("Per-class ROC Curves — Centralized")
+    ax.set_title("Per-class ROC Curves - Centralized Training")
     ax.legend(loc="lower right", fontsize=9); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     path = os.path.join(OUT_DIR, "roc_curves.png")
@@ -261,7 +261,7 @@ def _plot_pr_curves(all_labels, all_probs):
         prec_vals, rec_vals, _ = precision_recall_curve(y_true[:, i], all_probs[:, i])
         ax.plot(rec_vals, prec_vals, label=f"{cls} (AUC={auc(rec_vals, prec_vals):.3f})")
     ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
-    ax.set_title("Per-class PR Curves — Centralized")
+    ax.set_title("Per-class PR Curves - Centralized Training")
     ax.legend(loc="lower left", fontsize=9); ax.grid(True, alpha=0.3)
     plt.tight_layout()
     path = os.path.join(OUT_DIR, "pr_curves.png")
@@ -274,8 +274,6 @@ def _plot_training_curves(train_losses, accuracies):
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     axes[0].plot(epochs_x, accuracies, label="Accuracy", marker="o", markersize=3, color="steelblue")
-    axes[0].axhline(y=0.70, color="gray",  linestyle="--", linewidth=1.2, label="70% start")
-    axes[0].axhline(y=0.80, color="green", linestyle="--", linewidth=1.2, label="80% target")
     axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Accuracy")
     axes[0].set_title(f"Centralized Accuracy over {EPOCHS} Epochs")
     axes[0].legend(); axes[0].grid(True, alpha=0.3)
@@ -286,7 +284,7 @@ def _plot_training_curves(train_losses, accuracies):
     axes[1].set_title("Training Loss over Epochs")
     axes[1].legend(); axes[1].grid(True, alpha=0.3)
 
-    plt.suptitle("Centralized Continuation from 70% — ISIC 2019", fontsize=13)
+    plt.suptitle("Centralized Training", fontsize=13)
     plt.tight_layout()
     path = os.path.join(OUT_DIR, "training_curves.png")
     plt.savefig(path, dpi=150); plt.close()

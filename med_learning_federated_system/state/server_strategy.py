@@ -193,7 +193,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         per_class_f1        = f1_score(all_labels, all_preds, average=None, zero_division=0)
 
         print("\n" + "=" * 60)
-        print(f"Final FL Evaluation — {self.simulation_id}")
+        print(f"Final FL Evaluation")
         print("=" * 60)
         print(f"Accuracy           : {acc*100:.2f}%")
         print(f"Weighted Precision : {precision:.4f}")
@@ -235,7 +235,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         ax.set_yticklabels(ISIC_CLASS_NAMES)
         ax.set_xlabel("Predicted Label")
         ax.set_ylabel("True Label")
-        ax.set_title(f"Confusion Matrix — {self.simulation_id}")
+        ax.set_title(f"Confusion Matrix")
 
         thresh = cm.max() / 2.0
         for i in range(cm.shape[0]):
@@ -263,7 +263,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         ax.plot([0, 1], [0, 1], "k--", linewidth=0.8)
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
-        ax.set_title(f"Per-class ROC Curves — {self.simulation_id}")
+        ax.set_title(f"Per-class ROC Curves")
         ax.legend(loc="lower right", fontsize=9)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -283,7 +283,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
 
         ax.set_xlabel("Recall")
         ax.set_ylabel("Precision")
-        ax.set_title(f"Per-class Precision-Recall Curves — {self.simulation_id}")
+        ax.set_title(f"Per-class Precision-Recall Curves")
         ax.legend(loc="lower left", fontsize=9)
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
@@ -304,13 +304,13 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
 
         # MTA curves — central starts from round 0, distributed from round 1
         axes[0].plot(self._central_rounds, self._central_mta_history,
-                     label="Centralized MTA", marker="o", markersize=3)
+                     label="Centralized Accuracy", marker="o", markersize=3)
         if self._dist_mta_history:
             axes[0].plot(self._dist_rounds, self._dist_mta_history,
-                         label="Distributed MTA", marker="s", markersize=3, linestyle="--")
+                         label="Distributed Accuracy", marker="s", markersize=3, linestyle="--")
         axes[0].set_xlabel("Round")
         axes[0].set_ylabel("Accuracy")
-        axes[0].set_title("MTA over FL Rounds")
+        axes[0].set_title("Accuracy over FL Rounds")
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
 
@@ -323,7 +323,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
 
-        plt.suptitle(f"FL Training Curves — {self.simulation_id}", fontsize=13)
+        plt.suptitle(f"FL Training Curves", fontsize=13)
         plt.tight_layout()
         path = os.path.join(LOG_DIR, f"{self.simulation_id}_training_curves.png")
         plt.savefig(path, dpi=150)
@@ -335,9 +335,9 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         print(f"Experiment        : {self.simulation_id}")
         print(f"Rounds completed  : {self.num_rounds}")
         if self._central_mta_history:
-            print(f"Final central MTA : {self._central_mta_history[-1]:.4f}")
-            print(f"Peak central MTA  : {max(self._central_mta_history):.4f}")
+            print(f"Final central Accuracy : {self._central_mta_history[-1]:.4f}")
+            print(f"Peak central Accuracy  : {max(self._central_mta_history):.4f}")
         if self._dist_mta_history:
-            print(f"Final dist MTA    : {self._dist_mta_history[-1]:.4f}")
+            print(f"Final distributed Accuracy    : {self._dist_mta_history[-1]:.4f}")
         print(f"Round log         : {self._csv_path}")
         print("=" * 60 + "\n")
