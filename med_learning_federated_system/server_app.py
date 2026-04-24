@@ -65,7 +65,7 @@ def server_fn(context: Context):
         # LR is more aggressive per step without adaptive dampening.
         on_fit_config_fn=lambda rnd: {
             "current-round": rnd,
-            "local-lr": 0.0005,
+            "local-lr": 0.001,
         },
     )
 
