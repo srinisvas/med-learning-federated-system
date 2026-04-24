@@ -61,7 +61,7 @@ FINAL_CKPT       = "isic_centralized_final.pth"
 OUT_DIR          = os.path.join(os.environ.get("FL_LOG_DIR", "results"), "centralized", "continuation")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-EPOCHS       = 50
+EPOCHS       = 30
 BATCH_SIZE   = 128
 BACKBONE_LR  = 4e-4
 HEAD_LR      = 4e-3
