@@ -11,13 +11,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchvision import transforms
 from torchvision.datasets import ImageFolder
+from torch.nn.utils import parameters_to_vector
 
 from med_learning_federated_system.models.resnet_cnn_model import med_tiny_resnet18
 from med_learning_federated_system.utils.dirichlet_partition import dirichlet_indices
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 DATA_ROOT: str = os.environ.get(
     "ISIC_DATA_ROOT",
     os.path.join(os.path.dirname(__file__), "data", "isic2019"),
@@ -30,9 +28,6 @@ IMG_SIZE:    int = 224
 _MEAN = (0.485, 0.456, 0.406)
 _STD  = (0.229, 0.224, 0.225)
 
-# ---------------------------------------------------------------------------
-# CLAHE contrast enhancement
-# ---------------------------------------------------------------------------
 
 class CLAHETransform:
     def __init__(self, clip_limit: float = 2.0, tile_grid_size: tuple = (8, 8)):
@@ -50,10 +45,6 @@ class CLAHETransform:
             arr = self.clahe.apply(arr)
         return Image.fromarray(arr)
 
-
-# ---------------------------------------------------------------------------
-# Transforms
-# ---------------------------------------------------------------------------
 
 TRAIN_TRANSFORMS = transforms.Compose([
     CLAHETransform(clip_limit=2.0, tile_grid_size=(8, 8)),
@@ -77,9 +68,6 @@ TEST_TRANSFORMS = transforms.Compose([
     transforms.Normalize(_MEAN, _STD),
 ])
 
-# ---------------------------------------------------------------------------
-# Module-level cache
-# ---------------------------------------------------------------------------
 _full_dataset:  Optional[ImageFolder]     = None
 _train_indices: Optional[List[List[int]]] = None
 _test_indices:  Optional[List[int]]       = None
@@ -87,11 +75,6 @@ _test_indices:  Optional[List[int]]       = None
 _TEST_SPLIT_RATIO: float = 0.15
 _DIRICHLET_SEED:   int   = 42
 
-# α=1.0 — near-IID. With only 10 clients, α=0.5 creates severe class skew
-# per client that causes gradient conflicts across the 5 sampled per round,
-# producing the oscillation pattern (loss drops, MTA stays flat).
-# α=1.0 keeps class proportions close to global distribution — each client's
-# gradient points in roughly the same direction, aggregation is coherent.
 _DIRICHLET_ALPHA:  float = 1.0
 
 
@@ -144,10 +127,6 @@ def _make_weighted_sampler(dataset: ImageFolder, indices: List[int]) -> Weighted
     )
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
 def get_isic_model(num_classes: int = NUM_CLASSES, base_width: int = 32) -> nn.Module:
     return med_tiny_resnet18(num_classes=num_classes, base_width=base_width)
 
@@ -194,24 +173,6 @@ def train(
     device: torch.device,
     lr: float = 0.001,
 ) -> Tuple[float, torch.Tensor]:
-    """
-    AdamW with differential LRs for FL fine-tuning with local-epochs=1.
-
-    Why AdamW works here with local-epochs=1:
-    The key insight is that AdamW's stateless re-initialization per round is
-    only harmful when local-epochs is high (3+), because many gradient steps
-    without momentum dampening causes overfitting to local data. With
-    local-epochs=1 (~80 steps), the re-initialization has minimal impact —
-    the model barely moves before aggregation. AdamW's adaptive per-parameter
-    scaling then becomes an advantage: it makes meaningful progress even with
-    a single pass, whereas SGD at the same LR makes steps too small to escape
-    the pretrained minimum in just 80 steps.
-
-    Differential LRs:
-      backbone = lr * 0.1 = 0.0001  (conservative — preserve pretrained features)
-      head     = lr       = 0.001   (adapts to local class distribution)
-    """
-    from torch.nn.utils import parameters_to_vector
 
     net.to(device)
     net.train()

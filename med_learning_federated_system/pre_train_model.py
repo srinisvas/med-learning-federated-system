@@ -1,19 +1,3 @@
-"""
-pre_train_model.py — Train EfficientNet-B0 to stable 70% on ISIC 2019.
-
-No plots, no metrics, no CSV. Just training + a stable checkpoint.
-
-"Stable" means accuracy stays >= TARGET_ACC for PATIENCE consecutive epochs.
-This avoids saving a checkpoint during a lucky spike — the model has to
-genuinely hold the target before stopping.
-
-Output: isic_pretrained_70pct.pth
-
-Usage:
-    export ISIC_DATA_ROOT="/dev/shm/isic2019_full"
-    python med_learning_federated_system/pre_train_model.py
-"""
-
 import math
 import os
 import warnings
@@ -37,12 +21,9 @@ from med_learning_federated_system.task import (
     _TransformSubset,
 )
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
 TARGET_ACC    = 0.70   # accuracy threshold to reach
-PATIENCE      = 3      # must stay >= TARGET_ACC for this many consecutive epochs
-MAX_EPOCHS    = 200    # hard cap
+PATIENCE      = 3      # must stay >= accuracy for this many consecutive epochs
+MAX_EPOCHS    = 200    # hard limit
 BATCH_SIZE    = 128
 BACKBONE_LR   = 4e-4
 HEAD_LR       = 4e-3
@@ -51,11 +32,6 @@ WARMUP_EPOCHS = 5
 MIXUP_ALPHA   = 0.2
 AMP_ENABLED   = torch.cuda.is_available()
 CHECKPOINT    = "isic_pretrained_70pct.pth"
-
-
-# ---------------------------------------------------------------------------
-# Data
-# ---------------------------------------------------------------------------
 
 def build_loaders(batch_size: int = BATCH_SIZE):
     full_ds    = ImageFolder(root=DATA_ROOT, transform=TEST_TRANSFORMS)
@@ -95,11 +71,6 @@ def build_loaders(batch_size: int = BATCH_SIZE):
     )
     return train_loader, test_loader
 
-
-# ---------------------------------------------------------------------------
-# Optimizer and schedule
-# ---------------------------------------------------------------------------
-
 def get_optimizer(model: nn.Module) -> torch.optim.Optimizer:
     head_names = {"classifier.1.weight", "classifier.1.bias", "fc.weight", "fc.bias"}
     return torch.optim.AdamW([
@@ -125,11 +96,6 @@ def mixup(images, labels, alpha=MIXUP_ALPHA):
     idx = torch.randperm(images.size(0), device=images.device)
     return lam * images + (1 - lam) * images[idx], labels, labels[idx], lam
 
-
-# ---------------------------------------------------------------------------
-# Eval — returns accuracy only (no sklearn, no extra overhead)
-# ---------------------------------------------------------------------------
-
 def accuracy(model, loader, device):
     model.eval()
     correct, total = 0, 0
@@ -142,11 +108,6 @@ def accuracy(model, loader, device):
             correct += (outputs.argmax(1) == labels).sum().item()
             total   += labels.size(0)
     return correct / max(total, 1)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -232,7 +193,6 @@ def main():
             print(f"  FL:          ISIC_PRETRAINED_PATH={CHECKPOINT} flwr run .")
             return
 
-    # Fallback — hit MAX_EPOCHS without stabilizing at target
     torch.save(model.state_dict(), CHECKPOINT)
     final_acc = accuracy(model, test_loader, device)
     print(f"\nMax epochs reached. Final acc={final_acc*100:.2f}%")

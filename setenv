@@ -1,4 +1,0 @@
-export ISIC_DATA_ROOT="/dev/shm/isic2019_10pct"
-export OMP_NUM_THREADS=1
-export MKL_NUM_THREADS=1
-export FL_NUM_CLIENTS=10

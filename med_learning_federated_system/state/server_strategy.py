@@ -13,7 +13,7 @@ from flwr.common import Scalar, Parameters, EvaluateRes
 from flwr.server.client_proxy import ClientProxy
 
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend — required on HPC (no display)
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from sklearn.metrics import (
@@ -35,14 +35,6 @@ ISIC_CLASS_NAMES = ["AK", "BCC", "BKL", "DF", "MEL", "NV", "SCC", "VASC"]
 
 
 class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
-    """
-    FedAvg with:
-      - Per-round CSV logging (central_mta, dist_mta, central_loss)
-      - Full sklearn metrics suite at the end of the final round:
-        accuracy, weighted precision/recall/F1, confusion matrix,
-        per-class ROC curves (AUC), precision-recall curves
-      - All plots saved as PNG to LOG_DIR — no display required
-    """
 
     def __init__(
         self,
@@ -55,17 +47,10 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         super().__init__(**kwargs)
         self.simulation_id = simulation_id
         self.num_rounds    = num_rounds
-
-        # Model and loader for final-round full metrics.
-        # These are the same instances used by evaluate_fn in server_app.py —
-        # by the time _run_final_evaluation() is called, the model already has
-        # the final aggregated weights loaded (set by evaluate_fn this round).
         self._final_eval_model  = final_eval_model
         self._final_eval_loader = final_eval_loader
 
-        # _central_mta_history includes round 0 (init eval) + rounds 1..N  -> length N+1
-        # _dist_mta_history includes rounds 1..N only                        -> length N
-        # Keep track of round numbers separately to avoid x-axis mismatch.
+        # Keeps track of round numbers separately to avoid x-axis mismatch.
         self._central_mta_history: List[float] = []
         self._central_rounds:      List[int]   = []
         self._dist_mta_history:    List[float] = []
@@ -88,9 +73,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
                 [rnd, f"{central_mta:.4f}", f"{dist_mta:.4f}", f"{central_loss:.4f}"]
             )
 
-    # ------------------------------------------------------------------
-    # evaluate — buffer centralized result, write CSV in aggregate_evaluate
-    # ------------------------------------------------------------------
+    # evaluate and capture centralized result, writes CSV in aggregate_evaluate
 
     def evaluate(
         self,
@@ -112,9 +95,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         print(f"[Round {server_round}] Centralized — loss={loss:.4f}, MTA={central_mta:.4f}")
         return loss, metrics
 
-    # ------------------------------------------------------------------
-    # aggregate_evaluate — write CSV row; run full metrics on final round
-    # ------------------------------------------------------------------
+    # aggregate_evaluate writes CSV.
 
     def aggregate_evaluate(
         self,
@@ -147,9 +128,7 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
 
         return agg_loss, {"dist_mta": dist_mta}
 
-    # ------------------------------------------------------------------
     # Final-round full evaluation
-    # ------------------------------------------------------------------
 
     def _run_final_evaluation(self) -> None:
         if self._final_eval_model is None or self._final_eval_loader is None:
@@ -293,16 +272,11 @@ class ISICFedAvgStrategy(fl.server.strategy.FedAvg):
         print(f"[Metrics] PR curves saved: {path}")
 
     def _plot_training_curves(self) -> None:
-        """
-        Plot MTA and loss over rounds.
 
-        _central_mta_history includes round 0 (init eval) through round N -> use _central_rounds
-        _dist_mta_history includes rounds 1..N only                        -> use _dist_rounds
-        Storing round numbers explicitly avoids any x-axis length mismatch.
-        """
+        #Plot MTA and loss over rounds.
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-        # MTA curves — central starts from round 0, distributed from round 1
+        # MTA curves
         axes[0].plot(self._central_rounds, self._central_mta_history,
                      label="Centralized Accuracy", marker="o", markersize=3)
         if self._dist_mta_history:

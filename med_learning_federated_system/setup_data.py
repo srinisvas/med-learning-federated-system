@@ -3,10 +3,6 @@ import sys
 import shutil
 import pathlib
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
 SCRIPT_DIR   = pathlib.Path(__file__).resolve().parent
 DATA_DIR     = SCRIPT_DIR / "data" / "isic2019"
 DATASET_SLUG = "salviohexia/isic-2019-skin-lesion-images-for-classification"
@@ -19,16 +15,11 @@ REQUIRED_FILES = [
 
 
 def _check_already_present() -> bool:
-    """Return True if the dataset looks complete in DATA_DIR."""
     return all((DATA_DIR / f).exists() for f in REQUIRED_FILES)
 
 
 def _symlink_or_copy(src: pathlib.Path, dst: pathlib.Path):
-    """
-    Create a symlink dst -> src.
-    Falls back to a recursive copy on platforms that disallow symlinks
-    (e.g. Windows without developer mode).
-    """
+
     if dst.exists() or dst.is_symlink():
         return  # already linked / copied
     try:
@@ -50,9 +41,6 @@ def main():
         )
         return
 
-    # -----------------------------------------------------------------------
-    # 1. Import kagglehub (give a clear error if not installed)
-    # -----------------------------------------------------------------------
     try:
         import kagglehub
     except ImportError:
@@ -63,9 +51,6 @@ def main():
         )
         sys.exit(1)
 
-    # -----------------------------------------------------------------------
-    # 2. Download dataset  (kagglehub caches it under ~/.cache/kagglehub)
-    # -----------------------------------------------------------------------
     print(f"Downloading dataset: {DATASET_SLUG}")
     print("This may take a while on the first run (~10 GB).\n")
 
@@ -86,18 +71,12 @@ def main():
 
     print(f"Downloaded to: {download_path}")
 
-    # -----------------------------------------------------------------------
-    # 3. Create data/isic2019/ and link / copy required files into it
-    # -----------------------------------------------------------------------
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     print(f"\nPopulating {DATA_DIR} ...")
 
     for item in download_path.iterdir():
         _symlink_or_copy(item, DATA_DIR / item.name)
 
-    # -----------------------------------------------------------------------
-    # 4. Final validation
-    # -----------------------------------------------------------------------
     missing = [f for f in REQUIRED_FILES if not (DATA_DIR / f).exists()]
     if missing:
         print(
@@ -112,7 +91,6 @@ def main():
             f"\nDataset ready at {DATA_DIR}\n"
             "You can now run the federated experiment."
         )
-
 
 if __name__ == "__main__":
     main()

@@ -58,11 +58,6 @@ def server_fn(context: Context):
         min_available_clients=num_clients,
         evaluate_fn=evaluate_fn,
         initial_parameters=initial_parameters,
-        # SGD in task.train() splits this as:
-        #   backbone LR = 0.0005 * 0.1 = 0.00005  (very conservative)
-        #   head LR     = 0.0005                   (adapts to local data)
-        # Lower than the AdamW regime because SGD at equivalent effective
-        # LR is more aggressive per step without adaptive dampening.
         on_fit_config_fn=lambda rnd: {
             "current-round": rnd,
             "local-lr": 0.001,

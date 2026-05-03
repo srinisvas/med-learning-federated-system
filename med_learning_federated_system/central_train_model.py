@@ -1,24 +1,3 @@
-"""
-central_train_model.py — Centralized continuation from 70% checkpoint.
-
-Loads isic_pretrained_70pct.pth and trains for 50 epochs.
-Directly comparable to 50 FL rounds — both start from the same checkpoint.
-
-Uses AdamW (correct for stateful centralized training) with cosine decay
-from full LR. No freeze phase — backbone already trained at 70%.
-
-Outputs → results/centralized/continuation/
-  - final_metrics.csv  (per-class P/R/F1 + weighted, same schema as FL)
-  - confusion_matrix.png
-  - roc_curves.png
-  - pr_curves.png
-  - training_curves.png  (70% and 80% reference lines for paper figures)
-
-Usage:
-    export ISIC_DATA_ROOT="/dev/shm/isic2019_50pct"
-    python med_learning_federated_system/central_train_model.py
-"""
-
 import csv
 import math
 import os
@@ -52,9 +31,7 @@ from med_learning_federated_system.task import (
     _TransformSubset,
 )
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 ISIC_CLASS_NAMES = ["AK", "BCC", "BKL", "DF", "MEL", "NV", "SCC", "VASC"]
 PRETRAIN_CKPT    = "isic_pretrained_70pct.pth"
 FINAL_CKPT       = "isic_centralized_final.pth"
@@ -68,11 +45,6 @@ HEAD_LR      = 4e-3
 WEIGHT_DECAY = 1e-4
 MIXUP_ALPHA  = 0.2
 AMP_ENABLED  = torch.cuda.is_available()
-
-
-# ---------------------------------------------------------------------------
-# Data — identical split to pre_train_model.py and FL task.py
-# ---------------------------------------------------------------------------
 
 def build_loaders(batch_size: int = BATCH_SIZE):
     full_ds    = ImageFolder(root=DATA_ROOT, transform=TEST_TRANSFORMS)
@@ -112,12 +84,6 @@ def build_loaders(batch_size: int = BATCH_SIZE):
     return train_loader, test_loader
 
 
-# ---------------------------------------------------------------------------
-# Optimizer — AdamW correct here (stateful centralized training).
-# No freeze phase — backbone already converged at 70%.
-# Cosine decay from full LR over EPOCHS with no warmup.
-# ---------------------------------------------------------------------------
-
 def get_optimizer(model: nn.Module) -> torch.optim.Optimizer:
     head_names = {"classifier.1.weight", "classifier.1.bias", "fc.weight", "fc.bias"}
     return torch.optim.AdamW([
@@ -127,7 +93,6 @@ def get_optimizer(model: nn.Module) -> torch.optim.Optimizer:
 
 
 def set_lr(optimizer, epoch, total_epochs):
-    """Pure cosine decay, no warmup — backbone already trained."""
     base_lrs = [BACKBONE_LR, HEAD_LR]
     min_lr   = 1e-7
     scale    = 0.5 * (1.0 + math.cos(math.pi * epoch / max(total_epochs, 1)))
@@ -139,11 +104,6 @@ def mixup(images, labels, alpha=MIXUP_ALPHA):
     lam = float(np.random.beta(alpha, alpha))
     idx = torch.randperm(images.size(0), device=images.device)
     return lam * images + (1 - lam) * images[idx], labels, labels[idx], lam
-
-
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
 
 def evaluate_model(model, loader, device):
     model.eval()
@@ -172,11 +132,6 @@ def evaluate_model(model, loader, device):
         confusion_matrix(all_labels, all_preds),
         all_labels, all_preds, all_probs,
     )
-
-
-# ---------------------------------------------------------------------------
-# Final evaluation — identical schema to FL server_strategy
-# ---------------------------------------------------------------------------
 
 def run_final_evaluation(model, loader, device, train_losses, accuracies):
     print("\n[Metrics] Running final evaluation on held-out test set...")
@@ -290,10 +245,7 @@ def _plot_training_curves(train_losses, accuracies):
     plt.savefig(path, dpi=150); plt.close()
     print(f"[Metrics] Training curves: {path}")
 
-
-# ---------------------------------------------------------------------------
 # Main
-# ---------------------------------------------------------------------------
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
